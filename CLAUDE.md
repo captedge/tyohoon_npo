@@ -14,6 +14,7 @@
 - **Flutterプロジェクトのパス**：`typhoon_ship_tracker/`（このフォルダ直下。英数字・アンダースコアのみのサブフォルダ名とし、日本語・アポストロフィを含む祖先パスの問題を回避する。過去プロジェクトの教訓は `docs/project-setup-lessons.md` 参照）
 - **セッション構成**：単一セッション（このCoworkセッション）で進行管理とコーディングの両方を担当する。Blenderプロジェクトのような複数セッション分業は行わない（Flutterのコードはテキストファイルであり、専用GUIアプリの操作が不要なため）。
 - **ビルド・実機/エミュレータでの動作確認**：Coworkのサンドボックスは Linux のため、Windows/Android向けのFlutterビルド実行はできない。実装が一区切りついたら、ユーザーのWindows機でのビルド・動作確認を依頼する。
+- **プロジェクト雛形の現状（2026-07-26）**：`pubspec.yaml`／`lib/`（main.dart、models、utils、widgets、screens）はCoworkが作成済み。ただしOSプラットフォーム雛形（`windows/`等）は`flutter create`コマンドが必要でサンドボックスでは生成できないため未着手。ユーザーが`typhoon_ship_tracker/`内で`flutter create --platforms=windows .`を実行する必要あり（TASKS.md参照）。
 - **このWindows機のFlutter環境・既知の癖**：`docs/flutter-windows-env-notes.md` に集約（Flutter SDK/Android SDKのパス、AVD名、`flutter analyze`がクラッシュする既知の問題、`.bat`納品時の注意、git操作はcommit.bat経由等）。技術的なつまずきが起きたら着手前に必ずこのファイルを確認する。
 
 ## 現状の要約（今後の判断に必要な最重要事項のみ）
@@ -21,11 +22,12 @@
 - **MVP順序**：デスクトップアプリから着手し、後にスマホへ展開する。
 - **台風データソース**：気象庁の「防災情報XML」（無認証・無料の電文フィード。正式なAPIではないため仕様変更リスクあり）を優先。フォールバックはJTWC（米軍）テキスト（無料公開ページ）。WNIは有料APIのため個人利用では採用せず、画像は補助確認のみ。手動でのグリッド目視読み取りは誤差0.5〜2度（最大約30海里超）と大きく、通常データソースとしては不採用（判断根拠は `docs/devlog-map-design.md` 参照）。
 - **オンライン/オフライン方針**：常時オンラインには依存しない。Wi-Fi接続時（出港前・寄港中）にJMA防災情報XML＋JTWCテキストをまとめて取得してキャッシュし、船上ではキャッシュデータをオフラインで利用するハイブリッド方式。
-- **航海計画データ**：会社フォーム（CSV/Excel）をユーザーが登録。変針点（Waypoint）ごとの予想位置・日時のみ抽出する。
+- **航海計画データ**：JRC ECDIS純正のルートCSV（会社フォーム）をユーザーが登録。列構成は確認済み（`TASKS.md`参照）だが日時列が無いため、出発日時をユーザーが1回入力し、区間距離÷区間速力[kn]で各変針点の到着時刻を積算して算出する。
 - **時刻の扱い**：台風・船それぞれ独立に、直前後2点間で線形補間する。再生ボタン／スライダーで任意時刻を選択すると、その時刻の台風位置・船位置・両者間の距離を算出・表示する。
 - **距離計算**：中分緯度法（Mid-Latitude Sailing）で海里表示。対象範囲が限定的（北海道〜フィリピン）なため大圏距離（Haversine）は不要と判断。
-- **地図表示**：簡易プロット版（緯度経度グリッド＋簡易海岸線をCustomPainterで自前描画、本物の地図タイルは使わない）。表示範囲は北緯20°〜50°・東経115°〜150°に固定（北海道〜フィリピン、中国・朝鮮半島を含む）。`InteractiveViewer`でパン・ズームに対応。
-- **git運用**：`git init`実行、`user.name`/`user.email`をグローバル設定済み（`Capt.Edge` / `captain.edge.management@gmail.com`）、リモート`https://github.com/captedge/tyohoon_npo.git`を`origin`として追加済み（2026-07-25）。初回push未実施。詳細は `docs/operation-rules.md` のgit運用ルールに従う（commit/pushはユーザーが「コミットして」と発言したときのみ、`commit.bat`経由）。
+- **地図表示**：簡易プロット版（緯度経度グリッド＋簡易海岸線をCustomPainterで自前描画、本物の地図タイルは使わない）。表示範囲は北緯5°〜50°・東経115°〜150°に固定（フィリピン全域・台湾・韓国・中国沿岸・日本全域を含む。当初は北緯20°〜50°で検討していたがフィリピン主要部が入らないため南側へ拡張、経緯は`docs/devlog-map-design.md`参照）。緯度・経度どちらもグリッド上に表示する。
+- **地図UIの決定事項（2026-07-26モックアップレビューで確定）**：ズームは`InteractiveViewer`のピンチ/マウスホイールに加え、＋／－ボタンとスライダーも用意する。表示は全て英語表記（船・台風・国名等のラベルを含む）。再生ボタンはトグル式（再生中に押すと一時停止、再度押すと再生再開）。
+- **git運用**：`git init`実行、`user.name`/`user.email`をグローバル設定済み（`Capt.Edge` / `captain.edge.management@gmail.com`）、リモート`https://github.com/captedge/tyohoon_npo.git`を`origin`として追加済み（2026-07-25）。初回commit/push完了（2026-07-25、`main`ブランチ、root-commit `279b179`）。詳細は `docs/operation-rules.md` のgit運用ルールに従う（commit/pushはユーザーが「コミットして」と発言したときのみ、`commit.bat`経由）。
 
 ## セッション開始チェックリスト
 
