@@ -1,10 +1,13 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
 import '../models/track_point.dart';
+import '../utils/coastline.dart';
 import '../utils/interpolation.dart';
+import '../utils/map_bounds.dart';
 import '../widgets/map_painter.dart';
 
 /// Main screen: map view with zoom controls and a time slider/play button.
@@ -36,14 +39,35 @@ class _MapScreenState extends State<MapScreen> {
   ];
 
   static const int _maxOffsetHours = 72;
-  static const double _minZoom = 1.0;
-  static const double _maxZoom = 8.0;
   double _offsetHours = 24;
   bool _isPlaying = false;
   Timer? _playTimer;
+
+  // _zoom/_translation are in MapBounds.canvasSize units (a fixed logical
+  // size — see MapBounds for why). _fitScale is the zoom level at which the
+  // whole canvas exactly fits the current viewport; it's the practical
+  // "zoomed all the way out" limit and depends on the window size, so it's
+  // recomputed on every layout rather than being a constant.
   double _zoom = 1.0;
+  Offset _translation = Offset.zero;
+  Size _viewportSize = Size.zero;
+  double _fitScale = 1.0;
+  bool _initializedView = false;
+
+  double get _minZoom => _fitScale;
+  double get _maxZoom => _fitScale * 12;
+
+  CoastlineData _coastline = CoastlineData.empty;
 
   DateTime get _currentTime => _startTime.add(Duration(minutes: (_offsetHours * 60).round()));
+
+  @override
+  void initState() {
+    super.initState();
+    CoastlineData.load().then((data) {
+      if (mounted) setState(() => _coastline = data);
+    });
+  }
 
   @override
   void dispose() {
@@ -70,22 +94,95 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
-  // NOTE: zoom is tracked as a single absolute scale ([_minZoom].._maxZoom])
-  // so the +/- buttons, the slider and the mouse wheel all agree on the
-  // current level. Pan offset is not preserved across a zoom change yet
-  // (TODO: zoom around the current viewport center instead of resetting it).
-  void _setZoom(double value) {
-    final clamped = value.clamp(_minZoom, _maxZoom).toDouble();
-    setState(() => _zoom = clamped);
-    _transformationController.value = Matrix4.identity()..scale(clamped, clamped);
+  // Zoom/pan are tracked explicitly as (_zoom, _translation) rather than
+  // trusting the raw Matrix4, since this screen never rotates the map —
+  // the transform is always "translate then uniform scale". That keeps the
+  // "zoom around a fixed point" math (below) simple and easy to verify,
+  // instead of chaining Matrix4 operations whose combined effect is harder
+  // to reason about.
+  //
+  // screenPoint = _translation + _zoom * scenePoint
+
+  void _applyTransform() {
+    _transformationController.value = Matrix4.identity()
+      ..translate(_translation.dx, _translation.dy)
+      ..scale(_zoom);
   }
 
-  void _zoomBy(double factor) => _setZoom(_zoom * factor);
+  void _zoomAtViewportPoint(Offset viewportPoint, double factor) {
+    final newZoom = (_zoom * factor).clamp(_minZoom, _maxZoom).toDouble();
+    if (newZoom == _zoom) return;
+    final scenePoint = (viewportPoint - _translation) / _zoom;
+    final newTranslation = viewportPoint - scenePoint * newZoom;
+    setState(() {
+      _zoom = newZoom;
+      _translation = newTranslation;
+    });
+    _applyTransform();
+  }
+
+  Offset get _viewportCenter => Offset(_viewportSize.width / 2, _viewportSize.height / 2);
+
+  void _zoomBy(double factor) => _zoomAtViewportPoint(_viewportCenter, factor);
+
+  void _setZoom(double value) => _zoomAtViewportPoint(_viewportCenter, value / _zoom);
 
   void _handlePointerScroll(PointerSignalEvent event) {
     if (event is PointerScrollEvent) {
       final zoomingIn = event.scrollDelta.dy < 0;
-      _zoomBy(zoomingIn ? 1.1 : 0.9);
+      _zoomAtViewportPoint(event.localPosition, zoomingIn ? 1.1 : 0.9);
+    }
+  }
+
+  // Keep (_zoom, _translation) in sync after the user drags/pinches the map
+  // directly via InteractiveViewer (which writes into the controller itself
+  // during those gestures).
+  void _syncFromController() {
+    final m = _transformationController.value;
+    final t = m.getTranslation();
+    setState(() {
+      _zoom = m.getMaxScaleOnAxis();
+      _translation = Offset(t.x, t.y);
+    });
+  }
+
+  // Recomputes _fitScale for the current viewport size, and — the first
+  // time only — centers the initial view on MapBounds.defaultCenterLat/Lon
+  // (roughly the middle of Japan) at a zoomed-in level, per the 2026-07-26
+  // decision to always start on a recognizable view rather than the whole
+  // N5-50/E115-150 range zoomed all the way out.
+  //
+  // Called from build() via LayoutBuilder, which runs during layout — so
+  // this only does plain field mutation here (safe: nothing has read these
+  // fields yet in this build pass). Actually applying the transform touches
+  // _transformationController (a ChangeNotifier that InteractiveViewer
+  // listens to), which is deferred to a post-frame callback to avoid
+  // mutating a listened-to notifier mid-layout.
+  void _updateViewportSize(Size viewportSize) {
+    _viewportSize = viewportSize;
+    if (viewportSize.width <= 0 || viewportSize.height <= 0) return;
+    _fitScale = math.min(
+      viewportSize.width / MapBounds.canvasWidth,
+      viewportSize.height / MapBounds.canvasHeight,
+    );
+    if (!_initializedView) {
+      _initializedView = true;
+      _zoom = (_fitScale * 1.8).clamp(_minZoom, _maxZoom).toDouble();
+      final center = MapBounds.toOffset(MapBounds.defaultCenterLat, MapBounds.defaultCenterLon);
+      _translation = _viewportCenter - center * _zoom;
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (mounted) _applyTransform();
+      });
+    } else {
+      // Window resized after the initial view was set: just keep the
+      // current zoom within the (possibly changed) valid range.
+      final clamped = _zoom.clamp(_minZoom, _maxZoom).toDouble();
+      if (clamped != _zoom) {
+        _zoom = clamped;
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) _applyTransform();
+        });
+      }
     }
   }
 
@@ -122,7 +219,10 @@ class _MapScreenState extends State<MapScreen> {
       body: Column(
         children: [
           Expanded(
-            child: Stack(
+            child: LayoutBuilder(
+              builder: (context, constraints) {
+                _updateViewportSize(Size(constraints.maxWidth, constraints.maxHeight));
+                return Stack(
               children: [
                 Listener(
                   onPointerSignal: _handlePointerScroll,
@@ -130,13 +230,11 @@ class _MapScreenState extends State<MapScreen> {
                     transformationController: _transformationController,
                     minScale: _minZoom,
                     maxScale: _maxZoom,
-                    onInteractionEnd: (details) {
-                      // Keep the slider/buttons in sync after a pinch gesture.
-                      setState(() {
-                        _zoom = _transformationController.value.getMaxScaleOnAxis();
-                      });
-                    },
-                    child: SizedBox.expand(
+                    onInteractionEnd: (details) => _syncFromController(),
+                    constrained: false,
+                    child: SizedBox(
+                      width: MapBounds.canvasWidth,
+                      height: MapBounds.canvasHeight,
                       child: CustomPaint(
                         painter: MapPainter(
                           shipPosition: ship,
@@ -144,6 +242,7 @@ class _MapScreenState extends State<MapScreen> {
                           typhoonPosition: typhoon,
                           typhoonForecastTrack: forecastFromNow,
                           distanceNauticalMiles: distance,
+                          coastlinePolygons: _coastline.polygons,
                         ),
                       ),
                     ),
@@ -200,6 +299,8 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                 ),
               ],
+                );
+              },
             ),
           ),
           SafeArea(

@@ -3,19 +3,19 @@ import 'package:flutter/material.dart';
 import '../utils/interpolation.dart';
 import '../utils/map_bounds.dart';
 
-/// Draws the simplified plot map: a lat/lon grid, placeholder coastlines,
-/// the typhoon forecast track, and the ship/typhoon markers with a distance
-/// line between them.
+/// Draws the simplified plot map: a lat/lon grid, coastline, the typhoon
+/// forecast track, and the ship/typhoon markers with a distance line
+/// between them.
 ///
-/// The coastline shapes here are rough placeholders (see TODO below) — they
-/// exist only to confirm the layout. Replace with real coastline data
-/// (Natural Earth, clipped to MapBounds) before shipping.
+/// Always paints into a canvas sized [MapBounds.canvasSize] (see that
+/// class for why) — the `size` passed to [paint] should match it.
 class MapPainter extends CustomPainter {
   final LatLng shipPosition;
   final List<LatLng> shipRoute;
   final LatLng typhoonPosition;
   final List<LatLng> typhoonForecastTrack;
   final double distanceNauticalMiles;
+  final List<List<LatLng>> coastlinePolygons;
 
   MapPainter({
     required this.shipPosition,
@@ -23,23 +23,24 @@ class MapPainter extends CustomPainter {
     required this.typhoonPosition,
     required this.typhoonForecastTrack,
     required this.distanceNauticalMiles,
+    this.coastlinePolygons = const [],
   });
 
   @override
   void paint(Canvas canvas, Size size) {
-    _drawGrid(canvas, size);
-    _drawPlaceholderCoastlines(canvas, size);
-    _drawShipRoute(canvas, size);
-    _drawTyphoonTrack(canvas, size);
-    _drawDistanceLine(canvas, size);
-    _drawShip(canvas, size);
-    _drawTyphoon(canvas, size);
+    _drawGrid(canvas);
+    _drawCoastline(canvas);
+    _drawShipRoute(canvas);
+    _drawTyphoonTrack(canvas);
+    _drawDistanceLine(canvas);
+    _drawShip(canvas);
+    _drawTyphoon(canvas);
   }
 
   // Full planned route (all waypoints, past and future) as a dotted line
   // with small markers at each waypoint. The current ship position is drawn
   // separately, on top, by _drawShip.
-  void _drawShipRoute(Canvas canvas, Size size) {
+  void _drawShipRoute(Canvas canvas) {
     if (shipRoute.length < 2) return;
     final routePaint = Paint()
       ..color = Colors.blue.shade300
@@ -48,7 +49,7 @@ class MapPainter extends CustomPainter {
 
     final path = Path();
     for (var i = 0; i < shipRoute.length; i++) {
-      final o = MapBounds.toOffset(shipRoute[i].latitude, shipRoute[i].longitude, size);
+      final o = MapBounds.toOffset(shipRoute[i].latitude, shipRoute[i].longitude);
       if (i == 0) {
         path.moveTo(o.dx, o.dy);
       } else {
@@ -63,125 +64,73 @@ class MapPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.2;
     for (final p in shipRoute) {
-      final o = MapBounds.toOffset(p.latitude, p.longitude, size);
+      final o = MapBounds.toOffset(p.latitude, p.longitude);
       canvas.drawCircle(o, 3.5, wptPaint);
       canvas.drawCircle(o, 3.5, wptBorder);
     }
   }
 
-  void _drawGrid(Canvas canvas, Size size) {
+  void _drawGrid(Canvas canvas) {
     final gridPaint = Paint()
       ..color = Colors.grey.withOpacity(0.4)
       ..strokeWidth = 1;
     final textStyle = TextStyle(color: Colors.grey.shade700, fontSize: 11);
 
     for (var lon = MapBounds.minLon; lon <= MapBounds.maxLon; lon += 5) {
-      final p1 = MapBounds.toOffset(MapBounds.maxLat, lon, size);
-      final p2 = MapBounds.toOffset(MapBounds.minLat, lon, size);
+      final p1 = MapBounds.toOffset(MapBounds.maxLat, lon);
+      final p2 = MapBounds.toOffset(MapBounds.minLat, lon);
       canvas.drawLine(p1, p2, gridPaint);
       _drawText(canvas, '${lon.round()}E', Offset(p1.dx + 2, 2), textStyle);
     }
     for (var lat = MapBounds.minLat; lat <= MapBounds.maxLat; lat += 5) {
-      final p1 = MapBounds.toOffset(lat, MapBounds.minLon, size);
-      final p2 = MapBounds.toOffset(lat, MapBounds.maxLon, size);
+      final p1 = MapBounds.toOffset(lat, MapBounds.minLon);
+      final p2 = MapBounds.toOffset(lat, MapBounds.maxLon);
       canvas.drawLine(p1, p2, gridPaint);
       _drawText(canvas, '${lat.round()}N', Offset(2, p1.dy + 2), textStyle);
     }
   }
 
-  // TODO(map-data): replace with real coastline polygons clipped to
-  // MapBounds (Natural Earth or similar free dataset). These shapes are
-  // rough placeholders only, sized to roughly match Japan/Korea/China/
-  // Taiwan/Philippines for layout purposes.
-  void _drawPlaceholderCoastlines(Canvas canvas, Size size) {
-    final land = Paint()..color = Colors.grey.shade400;
-    Offset o(double lat, double lon) => MapBounds.toOffset(lat, lon, size);
+  // Real coastline (Natural Earth 1:110m, clipped to MapBounds — see
+  // assets/coastline/README.md). Land/sea colors are placeholders pending
+  // the color discussion noted in TASKS.md.
+  void _drawCoastline(Canvas canvas) {
+    if (coastlinePolygons.isEmpty) return;
+    final land = Paint()
+      ..color = Colors.grey.shade400
+      ..style = PaintingStyle.fill;
+    final outline = Paint()
+      ..color = Colors.grey.shade600
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = 0.75;
 
-    final japan = Path()
-      ..moveTo(o(45, 144).dx, o(45, 144).dy)
-      ..lineTo(o(43, 146).dx, o(43, 146).dy)
-      ..lineTo(o(40, 142).dx, o(40, 142).dy)
-      ..lineTo(o(37, 140).dx, o(37, 140).dy)
-      ..lineTo(o(35, 138).dx, o(35, 138).dy)
-      ..lineTo(o(34, 136).dx, o(34, 136).dy)
-      ..lineTo(o(33, 134).dx, o(33, 134).dy)
-      ..lineTo(o(32, 131).dx, o(32, 131).dy)
-      ..lineTo(o(33, 129).dx, o(33, 129).dy)
-      ..lineTo(o(35, 130).dx, o(35, 130).dy)
-      ..lineTo(o(37, 133).dx, o(37, 133).dy)
-      ..lineTo(o(39, 136).dx, o(39, 136).dy)
-      ..lineTo(o(42, 139).dx, o(42, 139).dy)
-      ..lineTo(o(44, 142).dx, o(44, 142).dy)
-      ..close();
-    canvas.drawPath(japan, land);
-
-    final korea = Path()
-      ..moveTo(o(38, 124.5).dx, o(38, 124.5).dy)
-      ..lineTo(o(38.5, 126.5).dx, o(38.5, 126.5).dy)
-      ..lineTo(o(37, 129).dx, o(37, 129).dy)
-      ..lineTo(o(35, 129.5).dx, o(35, 129.5).dy)
-      ..lineTo(o(34.2, 127).dx, o(34.2, 127).dy)
-      ..lineTo(o(35, 125).dx, o(35, 125).dy)
-      ..lineTo(o(36.5, 124.5).dx, o(36.5, 124.5).dy)
-      ..close();
-    canvas.drawPath(korea, land);
-
-    final china = Path()
-      ..moveTo(o(46, 115).dx, o(46, 115).dy)
-      ..lineTo(o(46, 122).dx, o(46, 122).dy)
-      ..lineTo(o(40, 121).dx, o(40, 121).dy)
-      ..lineTo(o(36, 119).dx, o(36, 119).dy)
-      ..lineTo(o(32, 120).dx, o(32, 120).dy)
-      ..lineTo(o(28, 118).dx, o(28, 118).dy)
-      ..lineTo(o(24, 115).dx, o(24, 115).dy)
-      ..lineTo(o(5, 115).dx, o(5, 115).dy)
-      ..lineTo(o(46, 115).dx, o(46, 115).dy)
-      ..close();
-    canvas.drawPath(china, land);
-
-    canvas.drawOval(
-      Rect.fromCenter(
-        center: o(23.5, 121),
-        width: (o(23.5, 122).dx - o(23.5, 120).dx).abs(),
-        height: (o(25.5, 121).dy - o(22, 121).dy).abs(),
-      ),
-      land,
-    );
-
-    final luzon = Path()
-      ..moveTo(o(19, 121).dx, o(19, 121).dy)
-      ..lineTo(o(17, 122).dx, o(17, 122).dy)
-      ..lineTo(o(14, 121.5).dx, o(14, 121.5).dy)
-      ..lineTo(o(13, 120).dx, o(13, 120).dy)
-      ..lineTo(o(15, 119.5).dx, o(15, 119.5).dy)
-      ..lineTo(o(18, 120).dx, o(18, 120).dy)
-      ..close();
-    canvas.drawPath(luzon, land);
-
-    canvas.drawOval(
-      Rect.fromCenter(center: o(11, 123.5), width: 60, height: 44),
-      land,
-    );
-    canvas.drawOval(
-      Rect.fromCenter(center: o(8, 125), width: 90, height: 80),
-      land,
-    );
+    for (final polygon in coastlinePolygons) {
+      if (polygon.isEmpty) continue;
+      final path = Path();
+      for (var i = 0; i < polygon.length; i++) {
+        final o = MapBounds.toOffset(polygon[i].latitude, polygon[i].longitude);
+        if (i == 0) {
+          path.moveTo(o.dx, o.dy);
+        } else {
+          path.lineTo(o.dx, o.dy);
+        }
+      }
+      path.close();
+      canvas.drawPath(path, land);
+      canvas.drawPath(path, outline);
+    }
   }
 
-  void _drawTyphoonTrack(Canvas canvas, Size size) {
+  void _drawTyphoonTrack(Canvas canvas) {
     if (typhoonForecastTrack.isEmpty) return;
     final trackPaint = Paint()
       ..color = Colors.deepOrange
       ..strokeWidth = 2
       ..style = PaintingStyle.stroke;
 
-    final path = Path()
-      ..moveTo(
-        MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude, size).dx,
-        MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude, size).dy,
-      );
+    final start = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
+    final path = Path()..moveTo(start.dx, start.dy);
     for (final p in typhoonForecastTrack) {
-      final o = MapBounds.toOffset(p.latitude, p.longitude, size);
+      final o = MapBounds.toOffset(p.latitude, p.longitude);
       path.lineTo(o.dx, o.dy);
     }
     canvas.drawPath(_dashed(path), trackPaint);
@@ -192,15 +141,15 @@ class MapPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     for (final p in typhoonForecastTrack) {
-      final o = MapBounds.toOffset(p.latitude, p.longitude, size);
+      final o = MapBounds.toOffset(p.latitude, p.longitude);
       canvas.drawCircle(o, 5, markerPaint);
       canvas.drawCircle(o, 5, markerBorder);
     }
   }
 
-  void _drawDistanceLine(Canvas canvas, Size size) {
-    final shipOffset = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude, size);
-    final typhoonOffset = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude, size);
+  void _drawDistanceLine(Canvas canvas) {
+    final shipOffset = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
+    final typhoonOffset = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
     final dashPaint = Paint()
       ..color = Colors.grey.shade700
       ..strokeWidth = 1.5;
@@ -221,8 +170,8 @@ class MapPainter extends CustomPainter {
     );
   }
 
-  void _drawShip(Canvas canvas, Size size) {
-    final o = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude, size);
+  void _drawShip(Canvas canvas) {
+    final o = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
     final paint = Paint()..color = Colors.blue.shade400;
     final border = Paint()
       ..color = Colors.blue.shade900
@@ -239,8 +188,8 @@ class MapPainter extends CustomPainter {
         const TextStyle(color: Colors.black87, fontSize: 11));
   }
 
-  void _drawTyphoon(Canvas canvas, Size size) {
-    final o = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude, size);
+  void _drawTyphoon(Canvas canvas) {
+    final o = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
     final paint = Paint()..color = Colors.red.shade400;
     final border = Paint()
       ..color = Colors.red.shade900
@@ -286,6 +235,8 @@ class MapPainter extends CustomPainter {
     return oldDelegate.shipPosition.latitude != shipPosition.latitude ||
         oldDelegate.shipPosition.longitude != shipPosition.longitude ||
         oldDelegate.typhoonPosition.latitude != typhoonPosition.latitude ||
-        oldDelegate.typhoonPosition.longitude != typhoonPosition.longitude;
+        oldDelegate.typhoonPosition.longitude != typhoonPosition.longitude ||
+        oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
+        oldDelegate.shipRoute.length != shipRoute.length;
   }
 }
