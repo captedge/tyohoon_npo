@@ -1,3 +1,5 @@
+import 'dart:math' as math;
+
 import 'package:flutter/material.dart';
 
 import '../utils/interpolation.dart';
@@ -17,6 +19,13 @@ class MapPainter extends CustomPainter {
   final double distanceNauticalMiles;
   final List<List<LatLng>> coastlinePolygons;
 
+  /// The next waypoint ahead of [shipPosition] in time, used so the ship
+  /// icon's apex points toward it (2026-07-27 request) instead of always
+  /// pointing north. Null once the voyage is complete (no waypoint left
+  /// ahead) or if there's only a single track point — the icon then falls
+  /// back to pointing north.
+  final LatLng? nextWaypoint;
+
   MapPainter({
     required this.shipPosition,
     required this.shipRoute,
@@ -24,10 +33,12 @@ class MapPainter extends CustomPainter {
     required this.typhoonForecastTrack,
     required this.distanceNauticalMiles,
     this.coastlinePolygons = const [],
+    this.nextWaypoint,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
+    _drawSea(canvas, size);
     _drawGrid(canvas);
     _drawCoastline(canvas);
     _drawShipRoute(canvas);
@@ -43,7 +54,7 @@ class MapPainter extends CustomPainter {
   void _drawShipRoute(Canvas canvas) {
     if (shipRoute.length < 2) return;
     final routePaint = Paint()
-      ..color = Colors.blue.shade300
+      ..color = Colors.blue.shade600
       ..strokeWidth = 1.5
       ..style = PaintingStyle.stroke;
 
@@ -70,36 +81,53 @@ class MapPainter extends CustomPainter {
     }
   }
 
+  // Sea background, painted first so everything else layers on top of it.
+  // Tentative nautical-chart palette (light blue sea / tan land) proposed
+  // 2026-07-27 to replace the placeholder white-sea/grey-land look — see
+  // TASKS.md, still pending the user's sign-off on colors.
+  static const _seaColor = Color(0xFFD8EAF6);
+  static const _landColor = Color(0xFFE7DFC6);
+  static const _landOutlineColor = Color(0xFF9C8F66);
+
+  void _drawSea(Canvas canvas, Size size) {
+    canvas.drawRect(
+      Rect.fromLTWH(0, 0, size.width, size.height),
+      Paint()..color = _seaColor,
+    );
+  }
+
+  // Grid lines only — the "20N"/"120E" labels used to be drawn here too,
+  // baked into the map canvas, which meant they scrolled off-screen when
+  // zoomed/panned (2026-07-27 feedback). Labels are now a separate overlay
+  // in map_screen.dart (`_buildGridLabelOverlays`) that tracks the current
+  // viewport transform and stays pinned to the screen edges instead.
   void _drawGrid(Canvas canvas) {
     final gridPaint = Paint()
-      ..color = Colors.grey.withOpacity(0.4)
+      ..color = Colors.blueGrey.withOpacity(0.35)
       ..strokeWidth = 1;
-    final textStyle = TextStyle(color: Colors.grey.shade700, fontSize: 11);
 
     for (var lon = MapBounds.minLon; lon <= MapBounds.maxLon; lon += 5) {
       final p1 = MapBounds.toOffset(MapBounds.maxLat, lon);
       final p2 = MapBounds.toOffset(MapBounds.minLat, lon);
       canvas.drawLine(p1, p2, gridPaint);
-      _drawText(canvas, '${lon.round()}E', Offset(p1.dx + 2, 2), textStyle);
     }
     for (var lat = MapBounds.minLat; lat <= MapBounds.maxLat; lat += 5) {
       final p1 = MapBounds.toOffset(lat, MapBounds.minLon);
       final p2 = MapBounds.toOffset(lat, MapBounds.maxLon);
       canvas.drawLine(p1, p2, gridPaint);
-      _drawText(canvas, '${lat.round()}N', Offset(2, p1.dy + 2), textStyle);
     }
   }
 
-  // Real coastline (Natural Earth 1:110m, clipped to MapBounds — see
-  // assets/coastline/README.md). Land/sea colors are placeholders pending
-  // the color discussion noted in TASKS.md.
+  // Real coastline (Natural Earth 1:50m, clipped to MapBounds — see
+  // assets/coastline/README.md). Land/sea colors are a tentative proposal
+  // (see _seaColor/_landColor above), still pending the user's sign-off.
   void _drawCoastline(Canvas canvas) {
     if (coastlinePolygons.isEmpty) return;
     final land = Paint()
-      ..color = Colors.grey.shade400
+      ..color = _landColor
       ..style = PaintingStyle.fill;
     final outline = Paint()
-      ..color = Colors.grey.shade600
+      ..color = _landOutlineColor
       ..style = PaintingStyle.stroke
       ..strokeWidth = 0.75;
 
@@ -170,6 +198,12 @@ class MapPainter extends CustomPainter {
     );
   }
 
+  // Ship icon: an isosceles triangle whose apex points toward nextWaypoint
+  // (2026-07-27 request) instead of always pointing north. The bearing is
+  // computed directly in canvas (projected) space rather than on the
+  // sphere — fine at this scale, since Web Mercator is conformal (locally
+  // angle-preserving), and it keeps this in the same coordinate space as
+  // everything else the painter draws.
   void _drawShip(Canvas canvas) {
     final o = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
     final paint = Paint()..color = Colors.blue.shade400;
@@ -177,13 +211,31 @@ class MapPainter extends CustomPainter {
       ..color = Colors.blue.shade900
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
+
+    var angle = 0.0; // radians, clockwise from north (0 = pointing up)
+    final next = nextWaypoint;
+    if (next != null) {
+      final target = MapBounds.toOffset(next.latitude, next.longitude);
+      final dx = target.dx - o.dx;
+      final dy = target.dy - o.dy;
+      if (dx != 0 || dy != 0) {
+        angle = math.atan2(dx, -dy);
+      }
+    }
+
     final path = Path()
-      ..moveTo(o.dx, o.dy - 8)
-      ..lineTo(o.dx + 7, o.dy + 7)
-      ..lineTo(o.dx - 7, o.dy + 7)
+      ..moveTo(0, -8)
+      ..lineTo(7, 7)
+      ..lineTo(-7, 7)
       ..close();
+
+    canvas.save();
+    canvas.translate(o.dx, o.dy);
+    canvas.rotate(angle);
     canvas.drawPath(path, paint);
     canvas.drawPath(path, border);
+    canvas.restore();
+
     _drawText(canvas, 'Ship', Offset(o.dx + 10, o.dy - 6),
         const TextStyle(color: Colors.black87, fontSize: 11));
   }
@@ -237,6 +289,8 @@ class MapPainter extends CustomPainter {
         oldDelegate.typhoonPosition.latitude != typhoonPosition.latitude ||
         oldDelegate.typhoonPosition.longitude != typhoonPosition.longitude ||
         oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
-        oldDelegate.shipRoute.length != shipRoute.length;
+        oldDelegate.shipRoute.length != shipRoute.length ||
+        oldDelegate.nextWaypoint?.latitude != nextWaypoint?.latitude ||
+        oldDelegate.nextWaypoint?.longitude != nextWaypoint?.longitude;
   }
 }

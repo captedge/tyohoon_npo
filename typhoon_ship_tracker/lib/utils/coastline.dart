@@ -7,10 +7,10 @@ import 'interpolation.dart';
 /// Coastline polygons for the fixed map area (MapBounds), loaded once from
 /// a bundled asset.
 ///
-/// Source: Natural Earth 1:110m land data (public domain), clipped to
+/// Source: Natural Earth 1:50m land data (public domain), clipped to
 /// MapBounds and simplified. See assets/coastline/README.md for how it was
-/// generated. This is a real (if coarse) coastline, not the placeholder
-/// shapes that used to be hard-coded in map_painter.dart.
+/// generated. This is a real coastline, not the placeholder shapes that
+/// used to be hard-coded in map_painter.dart.
 class CoastlineData {
   final List<List<LatLng>> polygons;
 

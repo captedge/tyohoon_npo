@@ -34,6 +34,14 @@ class MapBounds {
     return math.log(math.tan(math.pi / 4 + latRad / 2)) * (180 / math.pi);
   }
 
+  /// Inverse of [_mercatorY]: converts a projected Mercator y value (in the
+  /// same "degree-equivalent" units) back to a latitude in degrees.
+  static double _inverseMercatorY(double mercatorYDeg) {
+    final mercatorYRad = mercatorYDeg * (math.pi / 180);
+    final latRad = 2 * math.atan(math.exp(mercatorYRad)) - math.pi / 2;
+    return latRad * (180 / math.pi);
+  }
+
   static final double _yTop = _mercatorY(maxLat);
   static final double _yBottom = _mercatorY(minLat);
 
@@ -54,5 +62,16 @@ class MapBounds {
     final x = (lon - minLon) / (maxLon - minLon) * canvasWidth;
     final y = (_yTop - _mercatorY(lat)) / (_yTop - _yBottom) * canvasHeight;
     return Offset(x, y);
+  }
+
+  /// Inverse of [toOffset]: converts a point on [canvasSize] back to a
+  /// lat/lon pair. Used for the cursor position readout (2026-07-27) — the
+  /// result is not clamped to MapBounds, so callers over/under the visible
+  /// range will get lat/lon values slightly outside N5-50/E115-150.
+  static ({double lat, double lon}) fromOffset(Offset offset) {
+    final lon = offset.dx / canvasWidth * (maxLon - minLon) + minLon;
+    final mercatorY = _yTop - offset.dy / canvasHeight * (_yTop - _yBottom);
+    final lat = _inverseMercatorY(mercatorY);
+    return (lat: lat, lon: lon);
   }
 }

@@ -59,6 +59,11 @@ class _MapScreenState extends State<MapScreen> {
 
   CoastlineData _coastline = CoastlineData.empty;
 
+  // Lat/lon under the mouse cursor, shown bottom-right (2026-07-27 request).
+  // Null when the cursor isn't over the map (or on touch-only devices,
+  // where hover events never fire — the readout just stays hidden there).
+  ({double lat, double lon})? _cursorLatLon;
+
   DateTime get _currentTime => _startTime.add(Duration(minutes: (_offsetHours * 60).round()));
 
   @override
@@ -134,6 +139,23 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // Converts a viewport (screen) point to lat/lon using the transform
+  // controller's *current* matrix, read fresh on every hover event rather
+  // than the (_zoom, _translation) state fields — those only get synced on
+  // interaction end, so they'd lag while actively dragging/zooming.
+  ({double lat, double lon})? _latLonAtViewportPoint(Offset viewportPoint) {
+    final m = _transformationController.value;
+    final scale = m.getMaxScaleOnAxis();
+    if (scale == 0) return null;
+    final t = m.getTranslation();
+    final scenePoint = (viewportPoint - Offset(t.x, t.y)) / scale;
+    return MapBounds.fromOffset(scenePoint);
+  }
+
+  void _handleHover(PointerHoverEvent event) {
+    setState(() => _cursorLatLon = _latLonAtViewportPoint(event.localPosition));
+  }
+
   // Keep (_zoom, _translation) in sync after the user drags/pinches the map
   // directly via InteractiveViewer (which writes into the controller itself
   // during those gestures).
@@ -203,6 +225,103 @@ class _MapScreenState extends State<MapScreen> {
     return '$dd $mmm. ${dt.year} $hh:$mi (JST)';
   }
 
+  // Cursor lat/lon readout (2026-07-27 request), formatted as
+  // "31-15.5N 140-23.4E": degrees, a dash, minutes with one decimal place
+  // (seconds folded into tenths of a minute — e.g. 15' 30" = 15.5'), then
+  // the hemisphere letter. The `minutes >= 60` check handles the rounding
+  // edge case where minutes round up to 60.0 (carries one into degrees).
+  String _formatDegMin(double value, String positiveSuffix, String negativeSuffix) {
+    final suffix = value >= 0 ? positiveSuffix : negativeSuffix;
+    final absValue = value.abs();
+    var deg = absValue.floor();
+    var minutes = double.parse(((absValue - deg) * 60).toStringAsFixed(1));
+    if (minutes >= 60) {
+      minutes -= 60;
+      deg += 1;
+    }
+    return '$deg-${minutes.toStringAsFixed(1)}$suffix';
+  }
+
+  String _formatCursorLatLon(double lat, double lon) {
+    return '${_formatDegMin(lat, 'N', 'S')} ${_formatDegMin(lon, 'E', 'W')}';
+  }
+
+  // Lat/lon grid labels ("20N", "120E"), pinned to the screen edges instead
+  // of scrolling with the map (2026-07-27 feedback: labels used to be baked
+  // into the map canvas at the true map edge, so they scrolled off-screen
+  // once zoomed/panned). Wrapped in AnimatedBuilder listening directly to
+  // the TransformationController — rather than _zoom/_translation, which
+  // only get updated in _syncFromController on interaction *end* — so the
+  // labels track smoothly during an in-progress drag/pinch too.
+  Widget _buildGridLabelOverlay() {
+    return IgnorePointer(
+      child: AnimatedBuilder(
+        animation: _transformationController,
+        builder: (context, _) {
+          final width = _viewportSize.width;
+          final height = _viewportSize.height;
+          if (width <= 0 || height <= 0) return const SizedBox.shrink();
+
+          final m = _transformationController.value;
+          final scale = m.getMaxScaleOnAxis();
+          final t = m.getTranslation();
+          final translation = Offset(t.x, t.y);
+
+          const margin = 4.0;
+          const lonLabelWidth = 34.0;
+          const latLabelHeight = 18.0;
+
+          final children = <Widget>[];
+          for (var lon = MapBounds.minLon; lon <= MapBounds.maxLon; lon += 5) {
+            final mapX = MapBounds.toOffset(MapBounds.minLat, lon).dx;
+            final screenX = translation.dx + scale * mapX;
+            if (screenX < -lonLabelWidth || screenX > width + lonLabelWidth) continue;
+            children.add(Positioned(
+              left: screenX.clamp(margin, math.max(margin, width - lonLabelWidth)),
+              top: margin,
+              child: _gridLabelChip('${lon.round()}E'),
+            ));
+          }
+          for (var lat = MapBounds.minLat; lat <= MapBounds.maxLat; lat += 5) {
+            final mapY = MapBounds.toOffset(lat, MapBounds.minLon).dy;
+            final screenY = translation.dy + scale * mapY;
+            if (screenY < -latLabelHeight || screenY > height + latLabelHeight) continue;
+            children.add(Positioned(
+              left: margin,
+              top: screenY.clamp(margin, math.max(margin, height - latLabelHeight)),
+              child: _gridLabelChip('${lat.round()}N'),
+            ));
+          }
+          return Stack(children: children);
+        },
+      ),
+    );
+  }
+
+  Widget _gridLabelChip(String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 1),
+      decoration: BoxDecoration(
+        color: Colors.white.withOpacity(0.8),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Text(
+        text,
+        style: TextStyle(fontSize: 11, color: Colors.blueGrey.shade700, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+
+  // The next waypoint ahead of [time] in the voyage plan, or null once
+  // there's none left (voyage complete) — used to point the ship icon's
+  // apex toward it (2026-07-27 request).
+  TrackPoint? _nextWaypointAfter(DateTime time) {
+    for (final p in _shipTrack) {
+      if (p.time.isAfter(time)) return p;
+    }
+    return null;
+  }
+
   @override
   Widget build(BuildContext context) {
     final ship = positionAt(_shipTrack, _currentTime);
@@ -213,6 +332,9 @@ class _MapScreenState extends State<MapScreen> {
         .toList();
     final shipRoute = _shipTrack.map((p) => LatLng(p.latitude, p.longitude)).toList();
     final distance = distanceNm(ship, typhoon);
+    final nextWpPoint = _nextWaypointAfter(_currentTime);
+    final nextWaypoint =
+        nextWpPoint == null ? null : LatLng(nextWpPoint.latitude, nextWpPoint.longitude);
 
     return Scaffold(
       appBar: AppBar(title: const Text('Typhoon & ship tracker')),
@@ -224,30 +346,36 @@ class _MapScreenState extends State<MapScreen> {
                 _updateViewportSize(Size(constraints.maxWidth, constraints.maxHeight));
                 return Stack(
               children: [
-                Listener(
-                  onPointerSignal: _handlePointerScroll,
-                  child: InteractiveViewer(
-                    transformationController: _transformationController,
-                    minScale: _minZoom,
-                    maxScale: _maxZoom,
-                    onInteractionEnd: (details) => _syncFromController(),
-                    constrained: false,
-                    child: SizedBox(
-                      width: MapBounds.canvasWidth,
-                      height: MapBounds.canvasHeight,
-                      child: CustomPaint(
-                        painter: MapPainter(
-                          shipPosition: ship,
-                          shipRoute: shipRoute,
-                          typhoonPosition: typhoon,
-                          typhoonForecastTrack: forecastFromNow,
-                          distanceNauticalMiles: distance,
-                          coastlinePolygons: _coastline.polygons,
+                MouseRegion(
+                  onHover: _handleHover,
+                  onExit: (_) => setState(() => _cursorLatLon = null),
+                  child: Listener(
+                    onPointerSignal: _handlePointerScroll,
+                    child: InteractiveViewer(
+                      transformationController: _transformationController,
+                      minScale: _minZoom,
+                      maxScale: _maxZoom,
+                      onInteractionEnd: (details) => _syncFromController(),
+                      constrained: false,
+                      child: SizedBox(
+                        width: MapBounds.canvasWidth,
+                        height: MapBounds.canvasHeight,
+                        child: CustomPaint(
+                          painter: MapPainter(
+                            shipPosition: ship,
+                            shipRoute: shipRoute,
+                            typhoonPosition: typhoon,
+                            typhoonForecastTrack: forecastFromNow,
+                            distanceNauticalMiles: distance,
+                            coastlinePolygons: _coastline.polygons,
+                            nextWaypoint: nextWaypoint,
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
+                Positioned.fill(child: _buildGridLabelOverlay()),
                 Positioned(
                   left: 12,
                   top: 12,
@@ -298,6 +426,27 @@ class _MapScreenState extends State<MapScreen> {
                     ],
                   ),
                 ),
+                if (_cursorLatLon != null)
+                  Positioned(
+                    right: 64,
+                    bottom: 12,
+                    child: IgnorePointer(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: Colors.white.withOpacity(0.85),
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          _formatCursorLatLon(_cursorLatLon!.lat, _cursorLatLon!.lon),
+                          style: const TextStyle(
+                            fontSize: 12,
+                            fontFeatures: [FontFeature.tabularFigures()],
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
               ],
                 );
               },
