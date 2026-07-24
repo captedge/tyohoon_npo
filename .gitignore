@@ -1,0 +1,14 @@
+# Flutter/Dart
+typhoon_ship_tracker/build/
+typhoon_ship_tracker/.dart_tool/
+typhoon_ship_tracker/.flutter-plugins
+typhoon_ship_tracker/.flutter-plugins-dependencies
+typhoon_ship_tracker/.packages
+typhoon_ship_tracker/*.iml
+
+# git commit運用の一時ファイル（履歴に残さない）
+commit_message.txt
+
+# OS
+.DS_Store
+Thumbs.db
