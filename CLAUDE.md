@@ -27,7 +27,7 @@
 - **距離計算**：中分緯度法（Mid-Latitude Sailing）で海里表示。対象範囲が限定的（北海道〜フィリピン）なため大圏距離（Haversine）は不要と判断。
 - **地図表示**：簡易プロット版（緯度経度グリッド＋海岸線をCustomPainterで自前描画、本物の地図タイルは使わない）。表示範囲は北緯5°〜50°・東経115°〜150°に固定（フィリピン全域・台湾・韓国・中国沿岸・日本全域を含む。当初は北緯20°〜50°で検討していたがフィリピン主要部が入らないため南側へ拡張、経緯は`docs/devlog-map-design.md`参照）。緯度・経度どちらもグリッド上に表示し、ラベルはズーム/パンしても画面端に追従表示（2026-07-27対応、`TASKS.md`参照）。投影法はWeb Mercator（形の歪み防止、表示比率は固定）、起動時は日本付近（北緯30°・東経135°）を中心に表示。海岸線データはNaturalEarth 1:50mで確定（配色はナビチャート風の淡い青の海／ベージュの陸、いずれも2026-07-27ユーザー確認済み、`TASKS.md`参照）。
 - **地図UIの決定事項**：ズームは`InteractiveViewer`のピンチ/マウスホイールに加え、＋／－ボタンとスライダーも用意する。表示は全て英語表記。再生ボタンはトグル式。カーソル位置の緯度経度を画面右下に度-分形式（例：31-15.5N）で追従表示、船アイコンは次のWPの方向を向く（いずれも2026-07-27対応、`TASKS.md`参照）。
-- **git運用**：`git init`実行、`user.name`/`user.email`をグローバル設定済み（`Capt.Edge` / `captain.edge.management@gmail.com`）、リモート`https://github.com/captedge/tyohoon_npo.git`を`origin`として追加済み（2026-07-25）。初回commit/push完了（2026-07-25、`main`ブランチ、root-commit `279b179`）。詳細は `docs/operation-rules.md` のgit運用ルールに従う（commit/pushはユーザーが「コミットして」と発言したときのみ、`commit.bat`経由）。
+- **git運用**：`git init`実行、`user.name`/`user.email`をグローバル設定済み（`Capt.Edge` / `captain.edge.management@gmail.com`）、リモート`https://github.com/captedge/tyohoon_npo.git`を`origin`として追加済み（2026-07-25）。直近のpush：2026-07-27、`main`ブランチ、commit `070c3d6`。詳細は `docs/operation-rules.md` のgit運用ルールに従う（commit/pushはユーザーが「コミットして」と発言したときのみ、`commit.bat`経由）。
 
 ## セッション開始チェックリスト
 

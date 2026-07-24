@@ -52,13 +52,27 @@ git管理を開始する場合は以下の方針に従う（2026-07-25時点で�
 - **git commit／git pushは、ユーザーが「コミットして」と発言したときだけ動く**（Coworkのサンドボックスから勝手にcommitやpushはしない）。
 - リモートを設定する場合、GitHubの認証情報はユーザーのWindows機側にあるため、**commitもpushも必ず`commit.bat`経由（またはユーザー自身のPowerShell操作）で行う**。Coworkのサンドボックスからは`git push`を実行しない（認証情報がないため）。
 - 初回セットアップ時は`user.name`/`user.email`のグローバル設定有無を先に確認する。
-- このWindows機での既知の落とし穴（`git add .`は初回コミットのみ、日本語ファイル名は`git add -u`＋新規ファイルのみASCIIパス個別指定、サンドボックスからの直接commit/pushは信頼できない等）は`docs/flutter-windows-env-notes.md`の「一般的な注意」5・6に集約。git導入時は必ず確認する。
+- このWindows機での既知の落とし穴（`git add .`は初回コミットのみ、日本語ファイル名は`git add -u`＋新規ファイルのみASCIIパス個別指定、サンドボックスからの直接commit/pushは信頼できない、サンドボックスからの読み取り専用gitコマンドでもロックファイルが残留しうる等）は`docs/flutter-windows-env-notes.md`の「一般的な注意」5・6・7に集約。git導入時は必ず確認する。下記「サンドボックスからのgitコマンド実行によるロックファイル残留」も参照。
 
 ### コミット運用フロー（3ステップ、git導入後に使う想定）
 
 1. ユーザーが「コミットして」と発言する
-2. Coworkが`commit_message.txt`を準備する：`git status`／`git diff`でその時点の変更内容を確認し、要約したコミットメッセージを`commit_message.txt`（`.gitignore`済み、gitの履歴には残らない一時ファイル）に書き出す
+2. Coworkが`commit_message.txt`を準備する：`git status`／`git diff`でその時点の変更内容を確認し、要約したコミットメッセージを`commit_message.txt`（`.gitignore`済み、gitの履歴には残らない一時ファイル）に書き出す。**この`git status`／`git diff`実行後、下記「サンドボックスからのgitコマンド実行によるロックファイル残留」の再発防止ルールに従いロックファイル残留を確認する。**
 3. ユーザーが`commit.bat`をダブルクリックする：`git add -A` → `git commit -F commit_message.txt` → `git push -u origin main`が一括実行される
+
+### サンドボックスからのgitコマンド実行によるロックファイル残留（2026-07-27発生・対策済み）
+
+**発生した問題**：Coworkのサンドボックスから、状態確認だけのつもりで`git status`（読み取り専用のコマンド）を実行したところ、出力に`warning: unable to unlink '.../.git/index.lock': Operation not permitted`という警告が出ていた。これはgitがコマンド実行中に一時作成する`.git/index.lock`を、終了時にgit自身が削除しようとして失敗したもの（サンドボックスからのファイル削除が権限エラーで失敗する既知の癖——`build/`等の削除失敗と同じ現象、`docs/flutter-windows-env-notes.md`参照——が`.git`配下でも起きた）。このとき警告を「サンドボックスからコミットしているわけではないから問題ない」と判断して放置し、削除しなかった。その後ユーザーが`commit.bat`をダブルクリックしたところ、残っていた`.git/index.lock`が邪魔をして`fatal: Unable to create '.../.git/index.lock': File exists`で失敗した（`allow_cowork_file_delete`でロックファイルの削除許可を得て除去後、2回目の`commit.bat`実行で成功）。
+
+**教訓**：
+- 残留ロックファイルは「誰が作ったか」に関わらず、その後のgit操作（サンドボックス側・Windows側どちらも）を全てブロックする。「自分はコミットしていないから無関係」という判断は誤り。
+- 警告メッセージ（`warning:`で始まる行）が出た場合、内容を読んで軽視せず、その場で対応する。「後で気をつける」に相当する先送り判断は宣言1違反。
+- 状態確認のためだけであっても、サンドボックスからのgitコマンド実行はロックファイル残留のリスクを伴う。可能な限り避け、必要な場合も`git status`/`git diff`/`git log`など読み取り専用コマンドに限定する（`add`/`commit`/`push`はそもそも実行しない、既存ルール通り）。
+
+**再発防止ルール（必須）**：
+1. サンドボックスから`git`コマンドを実行した場合は、警告の有無に関わらず、実行直後に`.git`配下に残留ロックファイルがないか機械的に確認する（例：`find "<repoパス>/.git" -name "*.lock"`。`index.lock`に限らず`HEAD.lock`／`refs/heads/*.lock`等も対象に含める）。
+2. 残留が見つかった場合は、ユーザーに完了報告する前に`allow_cowork_file_delete`で削除許可を得て除去し、再度残留がないことを確認する。
+3. 上記の確認を経てから、初めてユーザーに「commit.batを実行してください」と伝える。
 
 ### Windows専用ファイル（`.bat`等）納品前チェックリスト
 
