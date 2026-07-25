@@ -221,6 +221,7 @@ class _MapScreenState extends State<MapScreen> {
         currentPosition: positionAt(points, _currentTime),
         label: slot.info.designation ?? 'Typhoon',
         pressureLabel: slot.info.centralPressureHpa == null ? null : '${slot.info.centralPressureHpa}hPa',
+        showRings: slot.ringsEnabled,
       ));
     }
     return markers;
@@ -779,6 +780,32 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  // Toggles a typhoon's 100nm/200nm rings when its red icon is tapped on the
+  // map (2026-08-14 request: "台風アイコン赤丸をクリックで切り替え"). Called
+  // from the GestureDetector wrapped around the map's CustomPaint in
+  // build() — [scenePosition] is already in canvas/scene coordinates (the
+  // same units as MapBounds.toOffset), since Flutter's hit-testing resolves
+  // ancestor transforms (InteractiveViewer's pan/zoom) before delivering the
+  // tap to this widget's local coordinate space. The hit radius is
+  // converted from an on-screen pixel size to scene units via 1/_zoom so
+  // the tappable area stays a consistent size regardless of zoom, matching
+  // how the icon itself is drawn at a fixed on-screen size.
+  void _handleMapTap(Offset scenePosition) {
+    final hitRadiusScene = 14 / _zoom;
+    for (var i = 0; i < _typhoonSlots.length; i++) {
+      final slot = _typhoonSlots[i];
+      if (!slot.displayEnabled) continue;
+      final points = _trackPointsForSlot(i);
+      if (points == null || points.isEmpty) continue;
+      final pos = positionAt(points, _currentTime);
+      final offset = MapBounds.toOffset(pos.latitude, pos.longitude);
+      if ((offset - scenePosition).distance <= hitRadiusScene) {
+        setState(() => slot.ringsEnabled = !slot.ringsEnabled);
+        return;
+      }
+    }
+  }
+
   // The next waypoint ahead of [time] in the voyage plan, or null once
   // there's none left (voyage complete) — used to point the ship icon's
   // apex toward it (2026-07-27 request).
@@ -829,6 +856,29 @@ class _MapScreenState extends State<MapScreen> {
               ),
             ],
           ),
+          PopupMenuButton<int>(
+            icon: const Icon(Icons.track_changes),
+            tooltip: '100/200nm rings',
+            onSelected: (i) => setState(() => _typhoonSlots[i].ringsEnabled = !_typhoonSlots[i].ringsEnabled),
+            itemBuilder: (context) {
+              final entries = <PopupMenuEntry<int>>[
+                for (var i = 0; i < _typhoonSlots.length; i++)
+                  if (_typhoonSlots[i].displayEnabled && _trackPointsForSlot(i) != null)
+                    CheckedPopupMenuItem<int>(
+                      value: i,
+                      checked: _typhoonSlots[i].ringsEnabled,
+                      child: Text(_typhoonSlots[i].info.designation ?? 'Typhoon ${i + 1}'),
+                    ),
+              ];
+              if (entries.isEmpty) {
+                entries.add(const PopupMenuItem<int>(
+                  enabled: false,
+                  child: Text('No typhoon loaded'),
+                ));
+              }
+              return entries;
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.speed),
             tooltip: 'Playback speed',
@@ -875,42 +925,36 @@ class _MapScreenState extends State<MapScreen> {
                     child: SizedBox(
                       width: MapBounds.canvasWidth,
                       height: MapBounds.canvasHeight,
-                      child: CustomPaint(
-                        painter: MapPainter(
-                          shipPosition: ship,
-                          shipRoute: shipRoute,
-                          shipPastRoute: shipSplit.past,
-                          shipFutureRoute: shipSplit.future,
-                          distanceNauticalMiles: distance,
-                          coastlinePolygons: _coastline.polygons,
-                          nextWaypoint: nextWaypoint,
-                          shipLabel: _shipLabel,
-                          zoom: _zoom,
-                          showShip: _shipDisplayEnabled,
-                          typhoons: typhoons,
+                      // Tap-to-toggle rings (2026-08-14 request): opaque so
+                      // taps register even over sea/empty canvas area (a
+                      // bare CustomPaint with no child doesn't otherwise
+                      // report hits there), same pattern already used for
+                      // the playback bar's GestureDetector. A plain tap
+                      // (no drag) coexists fine with InteractiveViewer's own
+                      // pan/pinch gesture recognizers.
+                      child: GestureDetector(
+                        behavior: HitTestBehavior.opaque,
+                        onTapUp: (details) => _handleMapTap(details.localPosition),
+                        child: CustomPaint(
+                          painter: MapPainter(
+                            shipPosition: ship,
+                            shipRoute: shipRoute,
+                            shipPastRoute: shipSplit.past,
+                            shipFutureRoute: shipSplit.future,
+                            distanceNauticalMiles: distance,
+                            coastlinePolygons: _coastline.polygons,
+                            nextWaypoint: nextWaypoint,
+                            shipLabel: _shipLabel,
+                            zoom: _zoom,
+                            showShip: _shipDisplayEnabled,
+                            typhoons: typhoons,
+                          ),
                         ),
                       ),
                     ),
                   ),
                 ),
                 Positioned.fill(child: _buildGridLabelOverlay()),
-                Positioned(
-                  left: 12,
-                  top: 12,
-                  child: IgnorePointer(
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                      decoration: BoxDecoration(
-                        color: Colors.white.withOpacity(0.85),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(
-                        _formatDateTime(_currentTime),
-                        style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
-                      ),
-                    ),
-                  ),
-                ),
                 Positioned(
                   right: 12,
                   top: 12,
@@ -944,27 +988,55 @@ class _MapScreenState extends State<MapScreen> {
                     ],
                   ),
                 ),
-                if (_cursorLatLon != null)
-                  Positioned(
-                    right: 64,
-                    bottom: 12,
-                    child: IgnorePointer(
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-                        decoration: BoxDecoration(
-                          color: Colors.white.withOpacity(0.85),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(
-                          _formatCursorLatLon(_cursorLatLon!.lat, _cursorLatLon!.lon),
-                          style: const TextStyle(
-                            fontSize: 12,
-                            fontFeatures: [FontFeature.tabularFigures()],
+                // JST date/time + cursor lat/lon, stacked bottom-right
+                // (2026-08-16 request): the date/time readout used to sit
+                // top-left, where at some zoom levels it overlapped the
+                // lat/lon grid labels (_buildGridLabelOverlay, also anchored
+                // to the top edge). Moved here, directly above the cursor
+                // lat/lon readout, so both share the same right-side column
+                // clear of the grid labels and the zoom controls (right: 64
+                // matches the cursor readout's previous position, chosen to
+                // clear the zoom button/slider column at right: 12).
+                Positioned(
+                  right: 64,
+                  bottom: 12,
+                  child: IgnorePointer(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      crossAxisAlignment: CrossAxisAlignment.end,
+                      children: [
+                        Container(
+                          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                          decoration: BoxDecoration(
+                            color: Colors.white.withOpacity(0.85),
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            _formatDateTime(_currentTime),
+                            style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w500),
                           ),
                         ),
-                      ),
+                        if (_cursorLatLon != null) ...[
+                          const SizedBox(height: 6),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.85),
+                              borderRadius: BorderRadius.circular(6),
+                            ),
+                            child: Text(
+                              _formatCursorLatLon(_cursorLatLon!.lat, _cursorLatLon!.lon),
+                              style: const TextStyle(
+                                fontSize: 12,
+                                fontFeatures: [FontFeature.tabularFigures()],
+                              ),
+                            ),
+                          ),
+                        ],
+                      ],
                     ),
                   ),
+                ),
               ],
                 );
               },
@@ -1162,6 +1234,13 @@ class _TyphoonSlot {
   String pastedText = '';
   JtwcTyphoonInfo info = JtwcTyphoonInfo.empty;
   bool displayEnabled = true;
+
+  // 100nm/200nm distance rings (2026-08-14 request), off by default.
+  // Toggled from the AppBar's rings menu (_RingsMenuAction) or by tapping
+  // the typhoon's red icon on the map (see _handleMapTap) — both act
+  // directly on this flag via setState, no dialog/Save step needed ("メニュー
+  // でのワンクリック...で切り替え").
+  bool ringsEnabled = false;
 }
 
 // Downward-pointing tail under the playback bar's time bubble.

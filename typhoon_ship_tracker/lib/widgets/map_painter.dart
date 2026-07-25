@@ -30,6 +30,13 @@ class TyphoonMarker {
   final String label;
   final String? pressureLabel;
 
+  /// Whether to draw the 100nm/200nm distance rings around
+  /// [currentPosition] (2026-08-14 request). Off by default; toggled either
+  /// from the AppBar's rings menu or by tapping the typhoon's red icon on
+  /// the map — both handled by the caller (map_screen.dart), this painter
+  /// just draws whatever's set here.
+  final bool showRings;
+
   const TyphoonMarker({
     required this.track,
     required this.pastTrack,
@@ -37,6 +44,7 @@ class TyphoonMarker {
     required this.currentPosition,
     required this.label,
     this.pressureLabel,
+    this.showRings = false,
   });
 }
 
@@ -310,7 +318,9 @@ class MapPainter extends CustomPainter {
       ..lineTo(typhoonOffset.dx, typhoonOffset.dy);
     canvas.drawPath(_dashed(path, dashLength: 4, gapLength: 3), dashPaint);
 
-    _drawDistanceLabel(canvas, shipOffset);
+    // The distance readout itself is now drawn together with the ship name
+    // label in _drawShip (2026-08-xx request: both stack behind the ship,
+    // name innermost / distance outermost), so nothing else to draw here.
   }
 
   // Distance readout, pinned behind the ship — i.e. the opposite direction
@@ -324,10 +334,15 @@ class MapPainter extends CustomPainter {
   // request) so the box/text/gap stay a constant on-screen size regardless
   // of map zoom — all the pixel math below (paddingH/paddingV/gap/box size)
   // is unchanged from before and is now simply interpreted in "screen
-  // pixel" units instead of "scene/canvas" units. The *direction* (behind)
-  // is still computed from the real (non-fixed-scale) scene offsets, since
-  // that's a geometry question, not a sizing one.
-  void _drawDistanceLabel(Canvas canvas, Offset shipOffset) {
+  // pixel" units instead of "scene/canvas" units.
+  //
+  // 2026-08-xx: no longer manages its own translate/scale/direction — the
+  // caller (_drawShip) already established the ship-local, zoom-corrected
+  // canvas space (so this stacks correctly with the name label drawn in the
+  // same space) and passes in [behind] (unit direction) and [startDistance]
+  // (how far along that direction this box's near edge should start, i.e.
+  // past whatever's already stacked closer to the ship).
+  void _drawDistanceLabel(Canvas canvas, Offset behind, double startDistance) {
     const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
     final painter = TextPainter(
       text: TextSpan(text: '${distanceNauticalMiles.round()} nm', style: style),
@@ -336,24 +351,14 @@ class MapPainter extends CustomPainter {
 
     const paddingH = 6.0;
     const paddingV = 3.0;
-    const gap = 12.0; // clearance from the ship icon (icon half-width ~7)
     final boxWidth = painter.width + paddingH * 2;
     final boxHeight = painter.height + paddingV * 2;
-
-    // Offset the box center along the "behind" direction by gap + half the
-    // box's diagonal, so the box clears the ship icon for any heading angle
-    // (not just left/right) instead of only being edge-aligned for one
-    // fixed direction.
-    final behind = _shipBehindDirection(shipOffset);
-    final offsetDistance = gap + math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight) / 2;
-    final localCenter = behind * offsetDistance;
+    final diagonal = math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight);
+    final localCenter = behind * (startDistance + diagonal / 2);
 
     final rect = Rect.fromCenter(center: localCenter, width: boxWidth, height: boxHeight);
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(4));
 
-    canvas.save();
-    canvas.translate(shipOffset.dx, shipOffset.dy);
-    canvas.scale(_invZoom);
     canvas.drawRRect(rrect, Paint()..color = Colors.blueGrey.shade800.withOpacity(0.9));
     canvas.drawRRect(
       rrect,
@@ -363,7 +368,6 @@ class MapPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
     painter.paint(canvas, Offset(rect.left + paddingH, rect.top + paddingV));
-    canvas.restore();
   }
 
   // Unit vector pointing opposite the ship's heading toward nextWaypoint —
@@ -384,6 +388,36 @@ class MapPainter extends CustomPainter {
       }
     }
     return const Offset(0, 1); // south, opposite the default north-pointing icon
+  }
+
+  // Unit vector pointing opposite a typhoon's direction of travel, used to
+  // place its designation label "behind" it the same way the ship's name
+  // sits behind the ship (2026-08-xx request). Unlike the ship there's no
+  // explicit "next waypoint" — direction is inferred from the track itself:
+  // prefer the next forecast point just ahead of the current (interpolated)
+  // position ([futureTrack]'s second point, since its first point is always
+  // the current position — see splitTrackAtTime); if there's no forecast
+  // data left (already past the last point), fall back to the most recent
+  // leg of [pastTrack]. Falls back to south, matching the ship's own
+  // no-data fallback, if there isn't enough track to infer a direction from.
+  Offset _typhoonBehindDirection(TyphoonMarker typhoon, Offset currentOffset) {
+    if (typhoon.futureTrack.length >= 2) {
+      final target = typhoon.futureTrack[1];
+      final targetOffset = MapBounds.toOffset(target.latitude, target.longitude);
+      final dx = targetOffset.dx - currentOffset.dx;
+      final dy = targetOffset.dy - currentOffset.dy;
+      final length = math.sqrt(dx * dx + dy * dy);
+      if (length > 0) return Offset(-dx / length, -dy / length);
+    }
+    if (typhoon.pastTrack.length >= 2) {
+      final previous = typhoon.pastTrack[typhoon.pastTrack.length - 2];
+      final previousOffset = MapBounds.toOffset(previous.latitude, previous.longitude);
+      final dx = currentOffset.dx - previousOffset.dx;
+      final dy = currentOffset.dy - previousOffset.dy;
+      final length = math.sqrt(dx * dx + dy * dy);
+      if (length > 0) return Offset(-dx / length, -dy / length);
+    }
+    return const Offset(0, 1); // south, same no-data fallback as the ship
   }
 
   // Ship icon: an isosceles triangle whose apex points toward nextWaypoint
@@ -431,11 +465,35 @@ class MapPainter extends CustomPainter {
     canvas.drawPath(path, border);
     canvas.restore();
 
+    // Ship name + distance-to-typhoon, stacked behind the ship (2026-08-xx
+    // request: labels used to sit fixed to the right of the icon; now both
+    // always follow the "behind" direction — opposite of the heading toward
+    // nextWaypoint, same direction the distance box already used — so they
+    // read naturally regardless of which way the ship is heading. Stacked
+    // with the name innermost (closer to the ship) and the distance box
+    // outermost so the two never overlap. Font size/weight/color for the
+    // name are unchanged from before.
+    final behind = _shipBehindDirection(o);
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
-    _drawText(canvas, shipLabel, const Offset(10, -6),
-        const TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600));
+
+    const nameStyle = TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600);
+    final namePainter = TextPainter(
+      text: TextSpan(text: shipLabel, style: nameStyle),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const gap = 12.0; // clearance from the ship icon (icon half-width ~7), unchanged value
+    const stackGap = 4.0; // clearance between the name and the distance box
+    final nameDiagonal = math.sqrt(namePainter.width * namePainter.width + namePainter.height * namePainter.height);
+    final nameDistance = gap + nameDiagonal / 2;
+    final nameCenter = behind * nameDistance;
+    namePainter.paint(canvas, nameCenter - Offset(namePainter.width / 2, namePainter.height / 2));
+
+    if (typhoons.isNotEmpty) {
+      _drawDistanceLabel(canvas, behind, nameDistance + nameDiagonal / 2 + stackGap);
+    }
     canvas.restore();
   }
 
@@ -448,19 +506,34 @@ class MapPainter extends CustomPainter {
   // (fixed-size request), same treatment as _drawShip.
   void _drawTyphoonMarker(Canvas canvas, TyphoonMarker typhoon) {
     final o = MapBounds.toOffset(typhoon.currentPosition.latitude, typhoon.currentPosition.longitude);
+    _drawTyphoonRings(canvas, typhoon, o);
+
     final paint = Paint()..color = Colors.red.shade400;
     final border = Paint()
       ..color = Colors.red.shade900
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
 
+    // Designation label ("11W (NOUL)") now sits behind the typhoon's
+    // direction of travel (2026-08-xx request), same treatment as the ship
+    // name — previously fixed to the right of the icon. Font size/weight/
+    // color unchanged.
+    final behind = _typhoonBehindDirection(typhoon, o);
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
     canvas.drawCircle(Offset.zero, 10, paint);
     canvas.drawCircle(Offset.zero, 10, border);
-    _drawText(canvas, typhoon.label, const Offset(12, -6),
-        const TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.w600));
+
+    const labelStyle = TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.w600);
+    final labelPainter = TextPainter(
+      text: TextSpan(text: typhoon.label, style: labelStyle),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    const gap = 14.0; // clearance from the typhoon icon (radius 10)
+    final diagonal = math.sqrt(labelPainter.width * labelPainter.width + labelPainter.height * labelPainter.height);
+    final labelCenter = behind * (gap + diagonal / 2);
+    labelPainter.paint(canvas, labelCenter - Offset(labelPainter.width / 2, labelPainter.height / 2));
     canvas.restore();
 
     final pressureLabel = typhoon.pressureLabel;
@@ -474,6 +547,65 @@ class MapPainter extends CustomPainter {
           TextStyle(color: Colors.deepOrange.shade900, fontSize: 10, fontWeight: FontWeight.w600));
       canvas.restore();
     }
+  }
+
+  // 100nm/200nm distance rings around a typhoon's current position
+  // (2026-08-14 request), toggled per-typhoon via [TyphoonMarker.showRings].
+  // Colors are an initial pick ("ひとまずお任せ" — user deferred to us),
+  // chosen to read clearly against the sea/land/track/marker palette
+  // already in use: teal for the inner (100nm) ring, purple for the outer
+  // (200nm) one.
+  static const _ring100Color = Color(0xFF00897B);
+  static const _ring200Color = Color(0xFF6A1B9A);
+  static const double _ringStrokeWidthPx = 1.5;
+
+  // Rings are drawn in scene coordinates (so they zoom/pan with the map
+  // like the coastline — they represent a real geographic distance, unlike
+  // the fixed-size icons/labels), converting nautical miles to canvas
+  // pixels via [_pxPerNm]. Their outline thickness and the "100nm"/"200nm"
+  // labels are still fixed-size on screen, same treatment as the other
+  // labels (translate+scale(1/zoom)).
+  void _drawTyphoonRings(Canvas canvas, TyphoonMarker typhoon, Offset center) {
+    if (!typhoon.showRings) return;
+    final pxPerNm = _pxPerNm(typhoon.currentPosition.latitude);
+    _drawRing(canvas, center, 100 * pxPerNm, _ring100Color, '100nm');
+    _drawRing(canvas, center, 200 * pxPerNm, _ring200Color, '200nm');
+  }
+
+  // Canvas pixels per nautical mile at [latDeg] — a single scalar since Web
+  // Mercator is conformal (locally the same scale factor in every
+  // direction), derived from the fixed canvas-px-per-longitude-degree scale
+  // and the standard "1 degree of longitude = 60nm × cos(lat)" relation
+  // (verified against the y-axis derivative of MapBounds' Mercator formula
+  // giving the same result, as expected for a conformal projection).
+  double _pxPerNm(double latDeg) {
+    final pxPerLonDeg = MapBounds.canvasWidth / (MapBounds.maxLon - MapBounds.minLon);
+    final latRad = latDeg * math.pi / 180;
+    return pxPerLonDeg / (60 * math.cos(latRad));
+  }
+
+  // Draws one ring (outline only, no fill, so it doesn't obscure the map)
+  // plus its "100nm"/"200nm" label just outside the ring at the top
+  // (12 o'clock) — simple, predictable placement that doesn't need to
+  // reason about the typhoon's heading the way the designation label does.
+  void _drawRing(Canvas canvas, Offset center, double radiusScene, Color color, String label) {
+    final paint = Paint()
+      ..color = color.withOpacity(0.85)
+      ..style = PaintingStyle.stroke
+      ..strokeWidth = _ringStrokeWidthPx * _invZoom;
+    canvas.drawCircle(center, radiusScene, paint);
+
+    final labelStyle = TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w600);
+    final painter = TextPainter(
+      text: TextSpan(text: label, style: labelStyle),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    final topPoint = Offset(center.dx, center.dy - radiusScene);
+    canvas.save();
+    canvas.translate(topPoint.dx, topPoint.dy);
+    canvas.scale(_invZoom);
+    painter.paint(canvas, Offset(-painter.width / 2, -painter.height - 2));
+    canvas.restore();
   }
 
   void _drawText(Canvas canvas, String text, Offset offset, TextStyle style) {
@@ -526,6 +658,7 @@ class MapPainter extends CustomPainter {
     for (var i = 0; i < typhoons.length && i < old.length; i++) {
       if (old[i].label != typhoons[i].label ||
           old[i].pressureLabel != typhoons[i].pressureLabel ||
+          old[i].showRings != typhoons[i].showRings ||
           old[i].track.length != typhoons[i].track.length ||
           old[i].pastTrack.length != typhoons[i].pastTrack.length ||
           old[i].futureTrack.length != typhoons[i].futureTrack.length ||
