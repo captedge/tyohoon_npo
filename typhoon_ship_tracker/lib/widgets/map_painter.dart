@@ -9,10 +9,13 @@ import '../utils/map_bounds.dart';
 /// one active typhoon at once, up to 3).
 ///
 /// Modeled after the ship: [track] is the *entire* chronological track
-/// (like [MapPainter.shipRoute]) and is drawn persistently as a dotted line
-/// with markers at every point, regardless of the time slider — "台風の軌跡
-/// は船のように残してください" (2026-07-28). [currentPosition] is the
-/// interpolated position at the current slider time and is drawn as the
+/// (like [MapPainter.shipRoute]) and is drawn persistently — with markers at
+/// every point regardless of the time slider ("台風の軌跡は船のように残して
+/// ください", 2026-07-28) — split into [pastTrack] (already elapsed, drawn
+/// solid) and [futureTrack] (still ahead, drawn dotted; 2026-08-03 request).
+/// Both halves share the interpolated point at the current slider time as
+/// their boundary — see `splitTrackAtTime` in `lib/utils/interpolation.dart`.
+/// [currentPosition] is that same interpolated position and is drawn as the
 /// moving marker, labeled with [label] (just the designation, e.g.
 /// "11W (NOUL)" — no pressure, no "(now)", since those don't make sense
 /// once the time slider has moved away from when the warning was read).
@@ -21,12 +24,16 @@ import '../utils/map_bounds.dart';
 /// ever measured at that one point in time.
 class TyphoonMarker {
   final List<LatLng> track;
+  final List<LatLng> pastTrack;
+  final List<LatLng> futureTrack;
   final LatLng currentPosition;
   final String label;
   final String? pressureLabel;
 
   const TyphoonMarker({
     required this.track,
+    required this.pastTrack,
+    required this.futureTrack,
     required this.currentPosition,
     required this.label,
     this.pressureLabel,
@@ -41,9 +48,31 @@ class TyphoonMarker {
 /// class for why) — the `size` passed to [paint] should match it.
 class MapPainter extends CustomPainter {
   final LatLng shipPosition;
+
+  /// Every waypoint of the voyage plan, past and future — used only to draw
+  /// the small dot marker at each waypoint. The line itself is drawn from
+  /// [shipPastRoute]/[shipFutureRoute] instead (2026-08-03 split).
   final List<LatLng> shipRoute;
+
+  /// Portion of [shipRoute] already sailed (drawn solid) / not yet reached
+  /// (drawn dotted) — see `splitTrackAtTime`. Both share the current
+  /// interpolated ship position as their boundary point.
+  final List<LatLng> shipPastRoute;
+  final List<LatLng> shipFutureRoute;
+
   final double distanceNauticalMiles;
   final List<List<LatLng>> coastlinePolygons;
+
+  /// Current map zoom (InteractiveViewer's scale). Used to counter-scale
+  /// point markers (ship/typhoon icons, waypoint dots) and text labels by
+  /// 1/zoom so they stay a constant size on screen regardless of how far
+  /// zoomed in/out the map is (2026-08-03 request: these "objects" were
+  /// scaling with the map and became oversized at high zoom). Route/track
+  /// *lines* intentionally keep scaling with the map — only point markers
+  /// and labels are fixed-size.
+  final double zoom;
+
+  double get _invZoom => zoom > 0 ? 1 / zoom : 1.0;
 
   /// The next waypoint ahead of [shipPosition] in time, used so the ship
   /// icon's apex points toward it (2026-07-27 request) instead of always
@@ -71,12 +100,15 @@ class MapPainter extends CustomPainter {
   MapPainter({
     required this.shipPosition,
     required this.shipRoute,
+    required this.shipPastRoute,
+    required this.shipFutureRoute,
     required this.distanceNauticalMiles,
     this.coastlinePolygons = const [],
     this.nextWaypoint,
     this.shipLabel = 'Ship',
     this.showShip = true,
     this.typhoons = const [],
+    this.zoom = 1.0,
   });
 
   @override
@@ -97,26 +129,15 @@ class MapPainter extends CustomPainter {
     }
   }
 
-  // Full planned route (all waypoints, past and future) as a dotted line
-  // with small markers at each waypoint. The current ship position is drawn
-  // separately, on top, by _drawShip.
+  // Planned route, split at the current slider time (2026-08-03): the
+  // already-sailed portion (shipPastRoute) as a solid line, the remaining
+  // portion (shipFutureRoute) as a dotted line — plus a small fixed-size dot
+  // marker at every waypoint (past and future alike). The current ship
+  // position is drawn separately, on top, by _drawShip.
   void _drawShipRoute(Canvas canvas) {
     if (shipRoute.length < 2) return;
-    final routePaint = Paint()
-      ..color = Colors.blue.shade600
-      ..strokeWidth = 1.5
-      ..style = PaintingStyle.stroke;
-
-    final path = Path();
-    for (var i = 0; i < shipRoute.length; i++) {
-      final o = MapBounds.toOffset(shipRoute[i].latitude, shipRoute[i].longitude);
-      if (i == 0) {
-        path.moveTo(o.dx, o.dy);
-      } else {
-        path.lineTo(o.dx, o.dy);
-      }
-    }
-    canvas.drawPath(_dashed(path, dashLength: 4, gapLength: 3), routePaint);
+    _drawPolyline(canvas, shipPastRoute, Colors.blue.shade600, dashed: false);
+    _drawPolyline(canvas, shipFutureRoute, Colors.blue.shade600, dashed: true);
 
     final wptPaint = Paint()..color = Colors.blue.shade100;
     final wptBorder = Paint()
@@ -124,10 +145,69 @@ class MapPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.2;
     for (final p in shipRoute) {
-      final o = MapBounds.toOffset(p.latitude, p.longitude);
-      canvas.drawCircle(o, 3.5, wptPaint);
-      canvas.drawCircle(o, 3.5, wptBorder);
+      _drawFixedCircle(canvas, MapBounds.toOffset(p.latitude, p.longitude), 3.5, wptPaint, wptBorder);
     }
+  }
+
+  // Shared solid/dashed line thickness for both the ship route and typhoon
+  // track (2026-08-03 request: "船と台風の実線/点線太さを揃えて") — in
+  // fixed on-screen pixels, same as [_drawFixedCircle]/labels (see
+  // strokeWidth handling below), not scene units.
+  static const double _trackStrokeWidthPx = 2.0;
+
+  // Shared dotted-line pattern for both the ship route and typhoon track
+  // (2026-08-03 request: "点線の一つ一つの長さと間隔も揃えてください...今の
+  // 船より少し細かいぐらいで" — finer than the ship's previous 4/3 pattern,
+  // and unified with the typhoon track's previously-different default 6/4).
+  static const double _trackDashLengthPx = 3.0;
+  static const double _trackGapLengthPx = 2.0;
+
+  // Draws [points] as a connected line (solid or dotted) in map/scene
+  // coordinates (endpoints move/scale with pan/zoom like the rest of the
+  // map) but with a stroke width that stays a constant on-screen thickness
+  // regardless of zoom (2026-08-03 request) — achieved by setting the
+  // Paint's strokeWidth to the desired screen pixels × 1/zoom, so that once
+  // InteractiveViewer scales this whole canvas by `zoom`, the rendered
+  // thickness comes back out to the desired screen pixel value. Shared by
+  // the ship route and typhoon track.
+  void _drawPolyline(
+    Canvas canvas,
+    List<LatLng> points,
+    Color color, {
+    required bool dashed,
+    double strokeWidthPx = _trackStrokeWidthPx,
+    double dashLength = _trackDashLengthPx,
+    double gapLength = _trackGapLengthPx,
+  }) {
+    if (points.length < 2) return;
+    final paint = Paint()
+      ..color = color
+      ..strokeWidth = strokeWidthPx * _invZoom
+      ..style = PaintingStyle.stroke;
+    final path = Path();
+    for (var i = 0; i < points.length; i++) {
+      final o = MapBounds.toOffset(points[i].latitude, points[i].longitude);
+      if (i == 0) {
+        path.moveTo(o.dx, o.dy);
+      } else {
+        path.lineTo(o.dx, o.dy);
+      }
+    }
+    canvas.drawPath(dashed ? _dashed(path, dashLength: dashLength, gapLength: gapLength) : path, paint);
+  }
+
+  // Draws a small filled+outlined circle at [center] whose on-screen size
+  // stays constant regardless of the map's current zoom (2026-08-03
+  // request) — achieved by translating to the marker's position and scaling
+  // by 1/zoom, canceling out the ambient zoom InteractiveViewer applies to
+  // this whole canvas.
+  void _drawFixedCircle(Canvas canvas, Offset center, double radius, Paint fill, Paint border) {
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.scale(_invZoom);
+    canvas.drawCircle(Offset.zero, radius, fill);
+    canvas.drawCircle(Offset.zero, radius, border);
+    canvas.restore();
   }
 
   // Sea background, painted first so everything else layers on top of it.
@@ -197,28 +277,17 @@ class MapPainter extends CustomPainter {
     }
   }
 
-  // Full typhoon track (past and future, like _drawShipRoute) as a dotted
-  // line with markers at every point (2026-07-28: "台風の軌跡：船のように
-  // 残してください" — previously this only drew the *remaining* forecast
-  // points, hiding the track behind the moving marker). The moving "now"
-  // marker + label is drawn separately, on top, by _drawTyphoonMarker.
+  // Full typhoon track (past and future, like _drawShipRoute), split at the
+  // current slider time (2026-08-03): elapsed portion solid, remaining
+  // forecast dotted — plus fixed-size marker dots at every point
+  // (2026-07-28: "台風の軌跡：船のように残してください" — previously this
+  // only drew the *remaining* forecast points, hiding the track behind the
+  // moving marker). The moving "now" marker + label is drawn separately, on
+  // top, by _drawTyphoonMarker.
   void _drawTyphoonTrack(Canvas canvas, TyphoonMarker typhoon) {
     if (typhoon.track.length < 2) return;
-    final trackPaint = Paint()
-      ..color = Colors.deepOrange
-      ..strokeWidth = 2
-      ..style = PaintingStyle.stroke;
-
-    final path = Path();
-    for (var i = 0; i < typhoon.track.length; i++) {
-      final o = MapBounds.toOffset(typhoon.track[i].latitude, typhoon.track[i].longitude);
-      if (i == 0) {
-        path.moveTo(o.dx, o.dy);
-      } else {
-        path.lineTo(o.dx, o.dy);
-      }
-    }
-    canvas.drawPath(_dashed(path), trackPaint);
+    _drawPolyline(canvas, typhoon.pastTrack, Colors.deepOrange, dashed: false);
+    _drawPolyline(canvas, typhoon.futureTrack, Colors.deepOrange, dashed: true);
 
     final markerPaint = Paint()..color = Colors.orange.shade200;
     final markerBorder = Paint()
@@ -226,9 +295,7 @@ class MapPainter extends CustomPainter {
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     for (final p in typhoon.track) {
-      final o = MapBounds.toOffset(p.latitude, p.longitude);
-      canvas.drawCircle(o, 5, markerPaint);
-      canvas.drawCircle(o, 5, markerBorder);
+      _drawFixedCircle(canvas, MapBounds.toOffset(p.latitude, p.longitude), 5, markerPaint, markerBorder);
     }
   }
 
@@ -252,6 +319,14 @@ class MapPainter extends CustomPainter {
   // west, since "left" then points into its direction of travel). Distance
   // from the ship, box size, and colors are unchanged from the previous
   // left-side version — only which side it sits on now follows the heading.
+  //
+  // 2026-08-03: drawn inside a translate+scale(1/zoom) block (fixed-size
+  // request) so the box/text/gap stay a constant on-screen size regardless
+  // of map zoom — all the pixel math below (paddingH/paddingV/gap/box size)
+  // is unchanged from before and is now simply interpreted in "screen
+  // pixel" units instead of "scene/canvas" units. The *direction* (behind)
+  // is still computed from the real (non-fixed-scale) scene offsets, since
+  // that's a geometry question, not a sizing one.
   void _drawDistanceLabel(Canvas canvas, Offset shipOffset) {
     const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
     final painter = TextPainter(
@@ -271,11 +346,14 @@ class MapPainter extends CustomPainter {
     // fixed direction.
     final behind = _shipBehindDirection(shipOffset);
     final offsetDistance = gap + math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight) / 2;
-    final center = shipOffset + behind * offsetDistance;
+    final localCenter = behind * offsetDistance;
 
-    final rect = Rect.fromCenter(center: center, width: boxWidth, height: boxHeight);
+    final rect = Rect.fromCenter(center: localCenter, width: boxWidth, height: boxHeight);
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(4));
 
+    canvas.save();
+    canvas.translate(shipOffset.dx, shipOffset.dy);
+    canvas.scale(_invZoom);
     canvas.drawRRect(rrect, Paint()..color = Colors.blueGrey.shade800.withOpacity(0.9));
     canvas.drawRRect(
       rrect,
@@ -285,6 +363,7 @@ class MapPainter extends CustomPainter {
         ..strokeWidth = 1,
     );
     painter.paint(canvas, Offset(rect.left + paddingH, rect.top + paddingV));
+    canvas.restore();
   }
 
   // Unit vector pointing opposite the ship's heading toward nextWaypoint —
@@ -313,6 +392,12 @@ class MapPainter extends CustomPainter {
   // sphere — fine at this scale, since Web Mercator is conformal (locally
   // angle-preserving), and it keeps this in the same coordinate space as
   // everything else the painter draws.
+  //
+  // 2026-08-03: both the icon and its label are drawn inside a
+  // translate+scale(1/zoom) block (fixed-size request) so they stay a
+  // constant on-screen size at any map zoom, instead of growing/shrinking
+  // with it. The heading angle itself is still computed from the real
+  // (non-fixed-scale) scene offsets — a geometry question, not a sizing one.
   void _drawShip(Canvas canvas) {
     final o = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
     final paint = Paint()..color = Colors.blue.shade400;
@@ -340,13 +425,18 @@ class MapPainter extends CustomPainter {
 
     canvas.save();
     canvas.translate(o.dx, o.dy);
+    canvas.scale(_invZoom);
     canvas.rotate(angle);
     canvas.drawPath(path, paint);
     canvas.drawPath(path, border);
     canvas.restore();
 
-    _drawText(canvas, shipLabel, Offset(o.dx + 10, o.dy - 6),
+    canvas.save();
+    canvas.translate(o.dx, o.dy);
+    canvas.scale(_invZoom);
+    _drawText(canvas, shipLabel, const Offset(10, -6),
         const TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600));
+    canvas.restore();
   }
 
   // Moving "now" marker + label (designation only, e.g. "11W (NOUL)") at
@@ -354,6 +444,8 @@ class MapPainter extends CustomPainter {
   // rather than following the marker — the central pressure at read time
   // (2026-07-28: "読み込み時の最低気圧は最初の点に残し固定。再生後は「番号
   // （名称）」のみ追従する").
+  // 2026-08-03: icon + labels drawn inside translate+scale(1/zoom) blocks
+  // (fixed-size request), same treatment as _drawShip.
   void _drawTyphoonMarker(Canvas canvas, TyphoonMarker typhoon) {
     final o = MapBounds.toOffset(typhoon.currentPosition.latitude, typhoon.currentPosition.longitude);
     final paint = Paint()..color = Colors.red.shade400;
@@ -361,17 +453,26 @@ class MapPainter extends CustomPainter {
       ..color = Colors.red.shade900
       ..style = PaintingStyle.stroke
       ..strokeWidth = 2;
-    canvas.drawCircle(o, 10, paint);
-    canvas.drawCircle(o, 10, border);
-    _drawText(canvas, typhoon.label, Offset(o.dx + 12, o.dy - 6),
+
+    canvas.save();
+    canvas.translate(o.dx, o.dy);
+    canvas.scale(_invZoom);
+    canvas.drawCircle(Offset.zero, 10, paint);
+    canvas.drawCircle(Offset.zero, 10, border);
+    _drawText(canvas, typhoon.label, const Offset(12, -6),
         const TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.w600));
+    canvas.restore();
 
     final pressureLabel = typhoon.pressureLabel;
     if (pressureLabel != null && typhoon.track.isNotEmpty) {
       final start = typhoon.track.first;
       final startOffset = MapBounds.toOffset(start.latitude, start.longitude);
-      _drawText(canvas, pressureLabel, Offset(startOffset.dx + 12, startOffset.dy + 8),
+      canvas.save();
+      canvas.translate(startOffset.dx, startOffset.dy);
+      canvas.scale(_invZoom);
+      _drawText(canvas, pressureLabel, const Offset(12, 8),
           TextStyle(color: Colors.deepOrange.shade900, fontSize: 10, fontWeight: FontWeight.w600));
+      canvas.restore();
     }
   }
 
@@ -410,10 +511,13 @@ class MapPainter extends CustomPainter {
         oldDelegate.shipPosition.longitude != shipPosition.longitude ||
         oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
         oldDelegate.shipRoute.length != shipRoute.length ||
+        oldDelegate.shipPastRoute.length != shipPastRoute.length ||
+        oldDelegate.shipFutureRoute.length != shipFutureRoute.length ||
         oldDelegate.nextWaypoint?.latitude != nextWaypoint?.latitude ||
         oldDelegate.nextWaypoint?.longitude != nextWaypoint?.longitude ||
         oldDelegate.shipLabel != shipLabel ||
         oldDelegate.showShip != showShip ||
+        oldDelegate.zoom != zoom ||
         oldDelegate.typhoons.length != typhoons.length ||
         _typhoonsChanged(oldDelegate.typhoons);
   }
@@ -423,6 +527,8 @@ class MapPainter extends CustomPainter {
       if (old[i].label != typhoons[i].label ||
           old[i].pressureLabel != typhoons[i].pressureLabel ||
           old[i].track.length != typhoons[i].track.length ||
+          old[i].pastTrack.length != typhoons[i].pastTrack.length ||
+          old[i].futureTrack.length != typhoons[i].futureTrack.length ||
           old[i].currentPosition.latitude != typhoons[i].currentPosition.latitude ||
           old[i].currentPosition.longitude != typhoons[i].currentPosition.longitude) {
         return true;

@@ -78,17 +78,34 @@ class JtwcTyphoonInfo {
   /// since JTWC bulletins give only day/hour/minute — pass in the real
   /// current date (not a previously-resolved _startTime) to avoid drift if
   /// this is called again later. Returns null if no such line was parsed.
+  ///
+  /// Deliberately builds a plain (non-UTC-tagged) DateTime whose fields
+  /// directly represent the JST wall-clock time, computing the UTC→JST
+  /// +9h day carry by hand instead of going through `DateTime.utc(...).add(...)`.
+  /// This app never calls `toUtc()`/`toLocal()` — every DateTime everywhere
+  /// (including `DateTime(_startTime.year, _startTime.month, _startTime.day)`
+  /// in the playback bar's day segments) is treated as a plain wall-clock
+  /// value. A `DateTime.utc(...)`-derived value here (2026-07-30 bug) is
+  /// tagged as UTC and so represents a different real instant than those
+  /// plain DateTimes whenever the device's OS timezone isn't UTC+0 — e.g. on
+  /// a JST machine, "UTC 25th 15:00" is actually the instant "26th 00:00
+  /// JST", which shifted the playback bar's day boundaries by a day even
+  /// though the displayed HH:MM (read via raw field access, unaffected by
+  /// the UTC tag) still looked correct.
   DateTime? issuedAtJst(DateTime reference) {
     final day = positionValidDay;
     if (day == null) return null;
-    final utc = DateTime.utc(
+    final utcMinutesOfDay = (positionValidHourUtc ?? 0) * 60 + (positionValidMinuteUtc ?? 0);
+    final jstMinutesOfDay = utcMinutesOfDay + 9 * 60;
+    final dayCarry = jstMinutesOfDay ~/ (24 * 60);
+    final minuteOfDay = jstMinutesOfDay % (24 * 60);
+    return DateTime(
       reference.year,
       reference.month,
-      day,
-      positionValidHourUtc ?? 0,
-      positionValidMinuteUtc ?? 0,
+      day + dayCarry,
+      minuteOfDay ~/ 60,
+      minuteOfDay % 60,
     );
-    return utc.add(const Duration(hours: 9));
   }
 
   /// Summary text for the settings dialog, e.g. "11W (NOUL) · 980hPa · 5

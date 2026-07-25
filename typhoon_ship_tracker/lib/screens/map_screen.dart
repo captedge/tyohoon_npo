@@ -1,15 +1,21 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:math' as math;
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
+import '../models/ship_waypoint.dart';
 import '../models/track_point.dart';
 import '../utils/coastline.dart';
 import '../utils/interpolation.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
+import '../utils/voyage_plan.dart';
+import '../utils/voyage_plan_parser.dart';
 import '../widgets/map_painter.dart';
+import 'voyage_plan_screen.dart';
 
 /// Main screen: map view with zoom controls and a time slider/play button.
 ///
@@ -42,8 +48,10 @@ class _MapScreenState extends State<MapScreen> {
   //
   // A getter (not `late final`) so it re-anchors to _startTime if that
   // changes after this is first read (see above) instead of freezing at
-  // whatever _startTime was on first access.
-  List<TrackPoint> get _shipTrack => [
+  // whatever _startTime was on first access. Used only as a fallback until
+  // a real voyage plan is imported — see _shipTrack/_shipWaypoints below
+  // (2026-07-30 request: CSV import + departure-time entry + WP add/edit).
+  List<TrackPoint> get _shipTrackSample => [
         TrackPoint(time: _startTime, latitude: 25.0, longitude: 121.0, label: 'Departure'),
         TrackPoint(time: _startTime.add(const Duration(hours: 20)), latitude: 24.0, longitude: 123.5, label: 'Waypoint 1'),
         TrackPoint(time: _startTime.add(const Duration(hours: 45)), latitude: 21.5, longitude: 124.0, label: 'Waypoint 2'),
@@ -51,14 +59,44 @@ class _MapScreenState extends State<MapScreen> {
         TrackPoint(time: _startTime.add(const Duration(hours: 95)), latitude: 17.5, longitude: 124.5, label: 'Waypoint 4'),
         TrackPoint(time: _startTime.add(const Duration(hours: 120)), latitude: 16.0, longitude: 127.0, label: 'Waypoint 5'),
       ];
-  // Derived from slot 0's last track point (sample fallback, or the last
-  // parsed forecast point once real JTWC text is pasted for it — see
-  // _trackPointsForSlot) instead of a fixed constant, so the timeline
-  // always reaches exactly as far as the available data goes (2026-07-25
-  // request: "provided data の最後まで表示したい").
+
+  // Real voyage plan, imported from a JRC ECDIS/NAVTOR route CSV and/or
+  // edited in VoyagePlanScreen (2026-07-30). Empty until the user imports
+  // or builds one — _shipTrack below falls back to _shipTrackSample until
+  // then, same pattern as the typhoon slots' fallback.
+  List<ShipWaypoint> _shipWaypoints = [];
+  DateTime? _voyageDepartureTime;
+
+  // The track actually used for drawing/position math: the real imported
+  // plan (times computed from _voyageDepartureTime — see
+  // shipTrackFromWaypoints) once one exists, otherwise the sample route.
+  List<TrackPoint> get _shipTrack {
+    if (_shipWaypoints.isEmpty) return _shipTrackSample;
+    try {
+      return shipTrackFromWaypoints(_shipWaypoints, _voyageDepartureTime ?? _startTime);
+    } on VoyagePlanTimeException {
+      // Shouldn't happen — VoyagePlanScreen validates this before Save —
+      // but fall back rather than crash the map if it ever does.
+      return _shipTrackSample;
+    }
+  }
+  // Derived from the ship's last waypoint (2026-08-10 request: "最終を航海
+  // 計画の最終WP到着時としたい：台風は途中で止まっても船は到着地までいく")
+  // instead of the typhoon's last forecast point — the playback bar now runs
+  // all the way to the ship's arrival regardless of how far the loaded
+  // typhoon data reaches. Previously this used slot 0's last track point
+  // (see the 2026-07-25 request this replaces: "provided data の最後まで
+  // 表示したい" — that was about the typhoon feed's horizon specifically,
+  // back when the ship route was still fixed sample data with no real
+  // "arrival"; now that a real voyage plan can be imported, the ship's own
+  // arrival is the more meaningful endpoint). Once the typhoon's own last
+  // point is earlier than this, its marker simply stays put at its last
+  // known position for the remainder of the timeline (positionAt clamps to
+  // the last point past a track's time range) rather than the slider being
+  // artificially cut short.
   double get _maxOffsetHours {
-    final points = _trackPointsForSlot(0);
-    if (points == null || points.isEmpty) return 0;
+    final points = _shipTrack;
+    if (points.isEmpty) return 0;
     final hours = points.last.time.difference(_startTime).inMinutes / 60.0;
     return hours > 0 ? hours : 0;
   }
@@ -175,8 +213,11 @@ class _MapScreenState extends State<MapScreen> {
       if (!slot.displayEnabled) continue;
       final points = _trackPointsForSlot(i);
       if (points == null || points.isEmpty) continue;
+      final split = splitTrackAtTime(points, _currentTime);
       markers.add(TyphoonMarker(
         track: points.map((p) => LatLng(p.latitude, p.longitude)).toList(),
+        pastTrack: split.past,
+        futureTrack: split.future,
         currentPosition: positionAt(points, _currentTime),
         label: slot.info.designation ?? 'Typhoon',
         pressureLabel: slot.info.centralPressureHpa == null ? null : '${slot.info.centralPressureHpa}hPa',
@@ -685,6 +726,59 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // Voyage plan import/edit (2026-07-30 request): lets the user load a JRC
+  // ECDIS route CSV, enter the departure date/time, and add waypoints /
+  // change leg speeds afterward. Both "Import CSV" and "Edit plan" open the
+  // same VoyagePlanScreen editor — importing just seeds it with the parsed
+  // CSV rows instead of the current in-app plan.
+  Future<void> _openVoyagePlanEditor(List<ShipWaypoint> seedWaypoints) async {
+    final result = await Navigator.push<VoyagePlanResult>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VoyagePlanScreen(
+          initialWaypoints: seedWaypoints,
+          initialDepartureTime: _voyageDepartureTime ?? _startTime,
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      _shipWaypoints = result.waypoints;
+      _voyageDepartureTime = result.departureTime;
+    });
+  }
+
+  Future<void> _importVoyagePlanCsv() async {
+    final picked = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+      dialogTitle: 'Select voyage plan CSV',
+    );
+    final path = picked?.files.single.path;
+    if (path == null || !mounted) return; // user cancelled, or web (no path)
+
+    String csvText;
+    try {
+      csvText = await File(path).readAsString();
+    } catch (e) {
+      if (mounted) _showVoyagePlanError('CSVファイルを読み込めませんでした: $e');
+      return;
+    }
+
+    try {
+      final waypoints = parseVoyagePlanCsv(csvText);
+      if (mounted) await _openVoyagePlanEditor(waypoints);
+    } on VoyagePlanParseException catch (e) {
+      if (mounted) _showVoyagePlanError(e.message);
+    }
+  }
+
+  void _showVoyagePlanError(String message) {
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message), backgroundColor: Colors.red.shade700),
+    );
+  }
+
   // The next waypoint ahead of [time] in the voyage plan, or null once
   // there's none left (voyage complete) — used to point the ship icon's
   // apex toward it (2026-07-27 request).
@@ -699,6 +793,7 @@ class _MapScreenState extends State<MapScreen> {
   Widget build(BuildContext context) {
     final ship = positionAt(_shipTrack, _currentTime);
     final shipRoute = _shipTrack.map((p) => LatLng(p.latitude, p.longitude)).toList();
+    final shipSplit = splitTrackAtTime(_shipTrack, _currentTime);
     final typhoons = _typhoonMarkers;
     final distance = typhoons.isEmpty ? 0.0 : distanceNm(ship, typhoons.first.currentPosition);
     final nextWpPoint = _nextWaypointAfter(_currentTime);
@@ -709,6 +804,31 @@ class _MapScreenState extends State<MapScreen> {
       appBar: AppBar(
         title: const Text('Typhoon & ship tracker'),
         actions: [
+          PopupMenuButton<_VoyagePlanMenuAction>(
+            icon: const Icon(Icons.directions_boat),
+            tooltip: 'Voyage plan',
+            onSelected: (action) {
+              switch (action) {
+                case _VoyagePlanMenuAction.importCsv:
+                  _importVoyagePlanCsv();
+                  break;
+                case _VoyagePlanMenuAction.edit:
+                  _openVoyagePlanEditor(_shipWaypoints);
+                  break;
+              }
+            },
+            itemBuilder: (context) => [
+              const PopupMenuItem(
+                value: _VoyagePlanMenuAction.importCsv,
+                child: Text('Import CSV...'),
+              ),
+              PopupMenuItem(
+                value: _VoyagePlanMenuAction.edit,
+                enabled: _shipWaypoints.isNotEmpty,
+                child: const Text('Edit voyage plan...'),
+              ),
+            ],
+          ),
           IconButton(
             icon: const Icon(Icons.speed),
             tooltip: 'Playback speed',
@@ -759,10 +879,13 @@ class _MapScreenState extends State<MapScreen> {
                         painter: MapPainter(
                           shipPosition: ship,
                           shipRoute: shipRoute,
+                          shipPastRoute: shipSplit.past,
+                          shipFutureRoute: shipSplit.future,
                           distanceNauticalMiles: distance,
                           coastlinePolygons: _coastline.polygons,
                           nextWaypoint: nextWaypoint,
                           shipLabel: _shipLabel,
+                          zoom: _zoom,
                           showShip: _shipDisplayEnabled,
                           typhoons: typhoons,
                         ),
@@ -1027,6 +1150,8 @@ class _MapScreenState extends State<MapScreen> {
     return columns;
   }
 }
+
+enum _VoyagePlanMenuAction { importCsv, edit }
 
 // One of up to 3 typhoon entry slots (2026-07-28 request). Mutable (not a
 // TrackPoint/const model) since it's edited in place from

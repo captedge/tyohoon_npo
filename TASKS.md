@@ -7,10 +7,9 @@
 - [ ] 気象庁「防災情報XML」の詳細スキーマ調査・パース実装（電文種類VPTW60。仕様・次のステップは`docs/data-format-notes.md`参照）
 - [ ] JTWC（米軍）テキストページの読込・パース（日時・緯度経度を抽出。抽出パターンは既に`lib/utils/jtwc_parser.dart`に実装済み・仕様は`docs/data-format-notes.md`参照。今回追加するのはページ取得＝定期フェッチ部分）
 - [ ] Wi-Fi時まとめ取得＋オフラインキャッシュの仕組み設計
-- [ ] 航海計画CSVパーサー実装（列構成は`docs/data-format-notes.md`参照。出発日時の入力UIと、区間距離÷速力での各WP到着時刻の計算ロジックが必要）
-- [ ] サンプルデータではなく実データを`MapScreen`に接続（`lib/screens/map_screen.dart`の`TODO(data)`参照）
+- [ ] 台風データの実データ接続（JMA防災情報XML・JTWCページ取得）を`MapScreen`に反映（`lib/screens/map_screen.dart`の`_typhoonTrackFallback`参照）
 
 ## 決定待ち・要確認事項
 
-- 出発日時の入力UI（画面のどこに置くか、日時ピッカーの形式）は見た目の話なので後日プロトタイプで確認
 - より高精細な海岸線データ（1:10m相当）への差し替え（優先度低、`docs/devlog-map-design.md`参照）
+- 航海計画編集画面の緯度経度入力は現在10進度（decimal degrees）。他画面の度分（deg-min）表記と揃えるかは今後ユーザーに確認
