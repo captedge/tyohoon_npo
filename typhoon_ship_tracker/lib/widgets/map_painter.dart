@@ -5,17 +5,43 @@ import 'package:flutter/material.dart';
 import '../utils/interpolation.dart';
 import '../utils/map_bounds.dart';
 
+/// One typhoon to draw (2026-07-28 request: this area can have more than
+/// one active typhoon at once, up to 3).
+///
+/// Modeled after the ship: [track] is the *entire* chronological track
+/// (like [MapPainter.shipRoute]) and is drawn persistently as a dotted line
+/// with markers at every point, regardless of the time slider — "台風の軌跡
+/// は船のように残してください" (2026-07-28). [currentPosition] is the
+/// interpolated position at the current slider time and is drawn as the
+/// moving marker, labeled with [label] (just the designation, e.g.
+/// "11W (NOUL)" — no pressure, no "(now)", since those don't make sense
+/// once the time slider has moved away from when the warning was read).
+/// [pressureLabel] is the central pressure *at read time*, pinned to
+/// `track.first` rather than following [currentPosition] — it was only
+/// ever measured at that one point in time.
+class TyphoonMarker {
+  final List<LatLng> track;
+  final LatLng currentPosition;
+  final String label;
+  final String? pressureLabel;
+
+  const TyphoonMarker({
+    required this.track,
+    required this.currentPosition,
+    required this.label,
+    this.pressureLabel,
+  });
+}
+
 /// Draws the simplified plot map: a lat/lon grid, coastline, the typhoon
-/// forecast track, and the ship/typhoon markers with a distance line
-/// between them.
+/// tracks, and the ship/typhoon markers with a distance line between the
+/// ship and the first (primary) typhoon.
 ///
 /// Always paints into a canvas sized [MapBounds.canvasSize] (see that
 /// class for why) — the `size` passed to [paint] should match it.
 class MapPainter extends CustomPainter {
   final LatLng shipPosition;
   final List<LatLng> shipRoute;
-  final LatLng typhoonPosition;
-  final List<LatLng> typhoonForecastTrack;
   final double distanceNauticalMiles;
   final List<List<LatLng>> coastlinePolygons;
 
@@ -26,14 +52,31 @@ class MapPainter extends CustomPainter {
   /// back to pointing north.
   final LatLng? nextWaypoint;
 
+  /// Label drawn next to the ship icon (2026-07-28 request: user-entered
+  /// "Ship's Name" instead of the generic "Ship", since NAVTOR-format
+  /// voyage-plan CSVs don't carry a ship name field). Defaults to 'Ship'
+  /// when the user hasn't set one.
+  final String shipLabel;
+
+  /// Whether to draw the ship at all (route, marker, label) — 2026-07-28
+  /// "Display" checkbox request.
+  final bool showShip;
+
+  /// Up to 3 typhoons (2026-07-28 request), already filtered to "Display
+  /// checkbox on" and "has at least a current position" by the caller —
+  /// this painter just draws whatever's in the list, in order. The distance
+  /// line/readout (when [showShip] is also true) measures to `typhoons.first`.
+  final List<TyphoonMarker> typhoons;
+
   MapPainter({
     required this.shipPosition,
     required this.shipRoute,
-    required this.typhoonPosition,
-    required this.typhoonForecastTrack,
     required this.distanceNauticalMiles,
     this.coastlinePolygons = const [],
     this.nextWaypoint,
+    this.shipLabel = 'Ship',
+    this.showShip = true,
+    this.typhoons = const [],
   });
 
   @override
@@ -41,11 +84,17 @@ class MapPainter extends CustomPainter {
     _drawSea(canvas, size);
     _drawGrid(canvas);
     _drawCoastline(canvas);
-    _drawShipRoute(canvas);
-    _drawTyphoonTrack(canvas);
-    _drawDistanceLine(canvas);
-    _drawShip(canvas);
-    _drawTyphoon(canvas);
+    if (showShip) _drawShipRoute(canvas);
+    for (final typhoon in typhoons) {
+      _drawTyphoonTrack(canvas, typhoon);
+    }
+    if (showShip && typhoons.isNotEmpty) {
+      _drawDistanceLine(canvas, typhoons.first.currentPosition);
+    }
+    if (showShip) _drawShip(canvas);
+    for (final typhoon in typhoons) {
+      _drawTyphoonMarker(canvas, typhoon);
+    }
   }
 
   // Full planned route (all waypoints, past and future) as a dotted line
@@ -148,18 +197,26 @@ class MapPainter extends CustomPainter {
     }
   }
 
-  void _drawTyphoonTrack(Canvas canvas) {
-    if (typhoonForecastTrack.isEmpty) return;
+  // Full typhoon track (past and future, like _drawShipRoute) as a dotted
+  // line with markers at every point (2026-07-28: "台風の軌跡：船のように
+  // 残してください" — previously this only drew the *remaining* forecast
+  // points, hiding the track behind the moving marker). The moving "now"
+  // marker + label is drawn separately, on top, by _drawTyphoonMarker.
+  void _drawTyphoonTrack(Canvas canvas, TyphoonMarker typhoon) {
+    if (typhoon.track.length < 2) return;
     final trackPaint = Paint()
       ..color = Colors.deepOrange
       ..strokeWidth = 2
       ..style = PaintingStyle.stroke;
 
-    final start = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
-    final path = Path()..moveTo(start.dx, start.dy);
-    for (final p in typhoonForecastTrack) {
-      final o = MapBounds.toOffset(p.latitude, p.longitude);
-      path.lineTo(o.dx, o.dy);
+    final path = Path();
+    for (var i = 0; i < typhoon.track.length; i++) {
+      final o = MapBounds.toOffset(typhoon.track[i].latitude, typhoon.track[i].longitude);
+      if (i == 0) {
+        path.moveTo(o.dx, o.dy);
+      } else {
+        path.lineTo(o.dx, o.dy);
+      }
     }
     canvas.drawPath(_dashed(path), trackPaint);
 
@@ -168,14 +225,14 @@ class MapPainter extends CustomPainter {
       ..color = Colors.deepOrange.shade900
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
-    for (final p in typhoonForecastTrack) {
+    for (final p in typhoon.track) {
       final o = MapBounds.toOffset(p.latitude, p.longitude);
       canvas.drawCircle(o, 5, markerPaint);
       canvas.drawCircle(o, 5, markerBorder);
     }
   }
 
-  void _drawDistanceLine(Canvas canvas) {
+  void _drawDistanceLine(Canvas canvas, LatLng typhoonPosition) {
     final shipOffset = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
     final typhoonOffset = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
     final dashPaint = Paint()
@@ -186,16 +243,68 @@ class MapPainter extends CustomPainter {
       ..lineTo(typhoonOffset.dx, typhoonOffset.dy);
     canvas.drawPath(_dashed(path, dashLength: 4, gapLength: 3), dashPaint);
 
-    final mid = Offset(
-      (shipOffset.dx + typhoonOffset.dx) / 2,
-      (shipOffset.dy + typhoonOffset.dy) / 2,
+    _drawDistanceLabel(canvas, shipOffset);
+  }
+
+  // Distance readout, pinned behind the ship — i.e. the opposite direction
+  // from its heading toward nextWaypoint (2026-07-28 request: a fixed
+  // "always to the left" position looked wrong once the ship is sailing
+  // west, since "left" then points into its direction of travel). Distance
+  // from the ship, box size, and colors are unchanged from the previous
+  // left-side version — only which side it sits on now follows the heading.
+  void _drawDistanceLabel(Canvas canvas, Offset shipOffset) {
+    const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
+    final painter = TextPainter(
+      text: TextSpan(text: '${distanceNauticalMiles.round()} nm', style: style),
+      textDirection: TextDirection.ltr,
+    )..layout();
+
+    const paddingH = 6.0;
+    const paddingV = 3.0;
+    const gap = 12.0; // clearance from the ship icon (icon half-width ~7)
+    final boxWidth = painter.width + paddingH * 2;
+    final boxHeight = painter.height + paddingV * 2;
+
+    // Offset the box center along the "behind" direction by gap + half the
+    // box's diagonal, so the box clears the ship icon for any heading angle
+    // (not just left/right) instead of only being edge-aligned for one
+    // fixed direction.
+    final behind = _shipBehindDirection(shipOffset);
+    final offsetDistance = gap + math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight) / 2;
+    final center = shipOffset + behind * offsetDistance;
+
+    final rect = Rect.fromCenter(center: center, width: boxWidth, height: boxHeight);
+    final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(4));
+
+    canvas.drawRRect(rrect, Paint()..color = Colors.blueGrey.shade800.withOpacity(0.9));
+    canvas.drawRRect(
+      rrect,
+      Paint()
+        ..color = Colors.white.withOpacity(0.6)
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1,
     );
-    _drawText(
-      canvas,
-      '${distanceNauticalMiles.round()} nm',
-      mid,
-      const TextStyle(color: Colors.black87, fontSize: 12, fontWeight: FontWeight.w500),
-    );
+    painter.paint(canvas, Offset(rect.left + paddingH, rect.top + paddingV));
+  }
+
+  // Unit vector pointing opposite the ship's heading toward nextWaypoint —
+  // the same heading _drawShip rotates its icon toward, just reversed and
+  // normalized here since this needs a direction to offset along rather
+  // than a rotation angle. Falls back to south (opposite of the default
+  // north-pointing icon) when there's no next waypoint, matching _drawShip's
+  // own fallback for that case.
+  Offset _shipBehindDirection(Offset shipOffset) {
+    final next = nextWaypoint;
+    if (next != null) {
+      final target = MapBounds.toOffset(next.latitude, next.longitude);
+      final dx = target.dx - shipOffset.dx;
+      final dy = target.dy - shipOffset.dy;
+      final length = math.sqrt(dx * dx + dy * dy);
+      if (length > 0) {
+        return Offset(-dx / length, -dy / length);
+      }
+    }
+    return const Offset(0, 1); // south, opposite the default north-pointing icon
   }
 
   // Ship icon: an isosceles triangle whose apex points toward nextWaypoint
@@ -236,12 +345,17 @@ class MapPainter extends CustomPainter {
     canvas.drawPath(path, border);
     canvas.restore();
 
-    _drawText(canvas, 'Ship', Offset(o.dx + 10, o.dy - 6),
-        const TextStyle(color: Colors.black87, fontSize: 11));
+    _drawText(canvas, shipLabel, Offset(o.dx + 10, o.dy - 6),
+        const TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600));
   }
 
-  void _drawTyphoon(Canvas canvas) {
-    final o = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
+  // Moving "now" marker + label (designation only, e.g. "11W (NOUL)") at
+  // the current slider time, plus — pinned to the track's *first* point
+  // rather than following the marker — the central pressure at read time
+  // (2026-07-28: "読み込み時の最低気圧は最初の点に残し固定。再生後は「番号
+  // （名称）」のみ追従する").
+  void _drawTyphoonMarker(Canvas canvas, TyphoonMarker typhoon) {
+    final o = MapBounds.toOffset(typhoon.currentPosition.latitude, typhoon.currentPosition.longitude);
     final paint = Paint()..color = Colors.red.shade400;
     final border = Paint()
       ..color = Colors.red.shade900
@@ -249,8 +363,16 @@ class MapPainter extends CustomPainter {
       ..strokeWidth = 2;
     canvas.drawCircle(o, 10, paint);
     canvas.drawCircle(o, 10, border);
-    _drawText(canvas, 'Typhoon (now)', Offset(o.dx + 12, o.dy - 6),
-        const TextStyle(color: Colors.red, fontSize: 11));
+    _drawText(canvas, typhoon.label, Offset(o.dx + 12, o.dy - 6),
+        const TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.w600));
+
+    final pressureLabel = typhoon.pressureLabel;
+    if (pressureLabel != null && typhoon.track.isNotEmpty) {
+      final start = typhoon.track.first;
+      final startOffset = MapBounds.toOffset(start.latitude, start.longitude);
+      _drawText(canvas, pressureLabel, Offset(startOffset.dx + 12, startOffset.dy + 8),
+          TextStyle(color: Colors.deepOrange.shade900, fontSize: 10, fontWeight: FontWeight.w600));
+    }
   }
 
   void _drawText(Canvas canvas, String text, Offset offset, TextStyle style) {
@@ -286,11 +408,26 @@ class MapPainter extends CustomPainter {
   bool shouldRepaint(covariant MapPainter oldDelegate) {
     return oldDelegate.shipPosition.latitude != shipPosition.latitude ||
         oldDelegate.shipPosition.longitude != shipPosition.longitude ||
-        oldDelegate.typhoonPosition.latitude != typhoonPosition.latitude ||
-        oldDelegate.typhoonPosition.longitude != typhoonPosition.longitude ||
         oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
         oldDelegate.shipRoute.length != shipRoute.length ||
         oldDelegate.nextWaypoint?.latitude != nextWaypoint?.latitude ||
-        oldDelegate.nextWaypoint?.longitude != nextWaypoint?.longitude;
+        oldDelegate.nextWaypoint?.longitude != nextWaypoint?.longitude ||
+        oldDelegate.shipLabel != shipLabel ||
+        oldDelegate.showShip != showShip ||
+        oldDelegate.typhoons.length != typhoons.length ||
+        _typhoonsChanged(oldDelegate.typhoons);
+  }
+
+  bool _typhoonsChanged(List<TyphoonMarker> old) {
+    for (var i = 0; i < typhoons.length && i < old.length; i++) {
+      if (old[i].label != typhoons[i].label ||
+          old[i].pressureLabel != typhoons[i].pressureLabel ||
+          old[i].track.length != typhoons[i].track.length ||
+          old[i].currentPosition.latitude != typhoons[i].currentPosition.latitude ||
+          old[i].currentPosition.longitude != typhoons[i].currentPosition.longitude) {
+        return true;
+      }
+    }
+    return false;
   }
 }

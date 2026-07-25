@@ -21,23 +21,23 @@
 
 **投影法・表示比率の見直し（メルカトル図法化）**（2026-07-26）— 実機レビューで「日本の形が縦に縮んで見える」との指摘を受け、原因（等角経緯度図法での経度方向の未補正＋ウィンドウ形状に応じた地図の伸縮）を特定し対応。`lib/utils/map_bounds.dart`をWeb Mercator投影に変更し、表示範囲の正しい縦横比を持つ固定論理キャンバス（`MapBounds.canvasSize`）を導入。起動時は日本付近（N30/E135）を中心に表示するよう変更（`MapBounds.defaultCenterLat/Lon`）。あわせて、より高精細な海岸線データ取得の技術検証（Natural Earth 1:50m等）を行い、Coworkのファイル取得サイズ制限により今回は取得不可と判明。回避策（ユーザーが直接ダウンロードしてプロジェクトフォルダに置く）を`TASKS.md`に記録。
 
-**海岸線データの実データ化・ズーム操作性の改善**（2026-07-26）— 仮の海岸線ポリゴンをNatural Earth 1:110m land data（TopoJSON経由）由来の実データに差し替え（`typhoon_ship_tracker/assets/coastline/coastline.json`、生成手順は同フォルダのREADME参照）。あわせてズーム処理を書き直し、マウスホイールはカーソル位置、ボタン/スライダーは画面中心を軸にズームするよう変更してパン位置リセット問題を解消。自己レビューで型エラー（`clamp`が`num`を返す問題）と`shouldRepaint`が海岸線読込完了を検知できていない不具合を発見・修正。詳細は`TASKS.md`参照。
+**海岸線データの実データ化・ズーム操作性の改善**（2026-07-26）— 仮の海岸線ポリゴンをNatural Earth 1:110m land data（TopoJSON経由）由来の実データに差し替え（`typhoon_ship_tracker/assets/coastline/coastline.json`、生成手順は同フォルダのREADME参照）。あわせてズーム処理を書き直し、マウスホイールはカーソル位置、ボタン/スライダーは画面中心を軸にズームするよう変更してパン位置リセット問題を解消。自己レビューで型エラー（`clamp`が`num`を返す問題）と`shouldRepaint`が海岸線読込完了を検知できていない不具合を発見・修正。海岸線データの詳細は`docs/devlog-map-design.md`参照。
 
 **Windows実機初回動作確認・レビュー反映**（2026-07-26）— `flutter run -d windows`がVisual Studio導入後に成功。操作性・台風表示は好評。フィードバックを受けて航海計画の点線＋Waypointマーカー（`_drawShipRoute`）と、画面上部固定の日時表示（`dd mmm. yyyy HH:MM (JST)`形式）を追加実装。海岸線の陸海配色・船アイコンのデザインは今後相談として`TASKS.md`に記録。
 
-**航海計画CSVの実サンプル確認**（2026-07-26）— ユーザー提供の実ファイル（`013K378NEG W-KII.csv`）で列構成を確認。公式マニュアル通りJRC ECDIS純正フォーマットで、日時列は無し。出発日時1回入力＋区間距離÷速力での到着時刻積算という設計方針を決定。詳細は`TASKS.md`「実サンプルで確認できた列構成」参照。
+**航海計画CSVの実サンプル確認**（2026-07-26）— ユーザー提供の実ファイル（`013K378NEG W-KII.csv`）で列構成を確認。公式マニュアル通りJRC ECDIS純正フォーマットで、日時列は無し。出発日時1回入力＋区間距離÷速力での到着時刻積算という設計方針を決定。詳細は`docs/data-format-notes.md`参照。
 
-**マウスホイールズーム・縦スライダーの追加、JRC ECDIS/NAVTOR CSV調査**（2026-07-26）— ユーザーからの操作性の質問を受け、`map_screen.dart`にマウスホイールでのズームと縦方向のズームスライダーを追加（＋／－ボタンと同じ`_zoom`状態で同期）。あわせて型エラー（`clamp`が`num`を返す問題）を修正。JRC ECDIS純正ルートCSV書式を公式マニュアルで調査し、列構成（WP No/Lat/Lon/Prt/Stb/Arr Rad/Speed/Sail）を確認。ただしETA/ETD列は純正書式に含まれないため、実サンプル確認が必要と判明（詳細は`TASKS.md`参照）。
+**マウスホイールズーム・縦スライダーの追加、JRC ECDIS/NAVTOR CSV調査**（2026-07-26）— ユーザーからの操作性の質問を受け、`map_screen.dart`にマウスホイールでのズームと縦方向のズームスライダーを追加（＋／－ボタンと同じ`_zoom`状態で同期）。あわせて型エラー（`clamp`が`num`を返す問題）を修正。JRC ECDIS純正ルートCSV書式を公式マニュアルで調査し、列構成（WP No/Lat/Lon/Prt/Stb/Arr Rad/Speed/Sail）を確認。ただしETA/ETD列は純正書式に含まれないため、実サンプル確認が必要と判明（詳細は`docs/data-format-notes.md`参照）。
 
-**Flutterプロジェクト雛形＋地図画面の初期実装**（2026-07-26）— `typhoon_ship_tracker/`に`pubspec.yaml`と`lib/`（models/track_point.dart、utils/interpolation.dart・map_bounds.dart、widgets/map_painter.dart、screens/map_screen.dart、main.dart）を作成。中分緯度法での距離計算、前後2点の線形補間、グリッド＋仮海岸線の描画、InteractiveViewer＋＋／－ズームボタン、再生／一時停止トグル付き時刻スライダーを実装。海岸線は実データ未選定のため仮ポリゴン（`TODO(map-data)`）。自己レビューで`Path.extractPath`への引数型エラー（`num`→`double`）を発見・修正済み。OSプラットフォーム雛形（`windows/`等）は`flutter create`が必要でサンドボックスでは生成不可のため、ユーザー側での実行待ち。気象庁「防災情報XML」の電文種類（VPTW60）と提供形態（PULL型・無認証）を調査、詳細は`TASKS.md`参照。
+**Flutterプロジェクト雛形＋地図画面の初期実装**（2026-07-26）— `typhoon_ship_tracker/`に`pubspec.yaml`と`lib/`（models/track_point.dart、utils/interpolation.dart・map_bounds.dart、widgets/map_painter.dart、screens/map_screen.dart、main.dart）を作成。中分緯度法での距離計算、前後2点の線形補間、グリッド＋仮海岸線の描画、InteractiveViewer＋＋／－ズームボタン、再生／一時停止トグル付き時刻スライダーを実装。海岸線は実データ未選定のため仮ポリゴン（`TODO(map-data)`）。自己レビューで`Path.extractPath`への引数型エラー（`num`→`double`）を発見・修正済み。OSプラットフォーム雛形（`windows/`等）は`flutter create`が必要でサンドボックスでは生成不可のため、ユーザー側での実行待ち。気象庁「防災情報XML」の電文種類（VPTW60）と提供形態（PULL型・無認証）を調査、詳細は`docs/data-format-notes.md`参照。
 
-**海岸線データの1:50m化・配色の暫定変更**（2026-07-27）— 前回セッションでは取得不可と判断していたNatural Earth 1:50mデータを、`registry.npmjs.org`経由（`world-atlas@1.1.4`）で取得できることを発見し、`coastline.json`を1:110m（14ポリゴン/約300点）から1:50m（123ポリゴン/約3,000点）に差し替え。差し替え前にmatplotlibで描画して形状を目視確認済み。あわせて陸海の配色を仮の白／灰色から、ナビチャート風（淡い青の海／ベージュの陸）へ暫定変更（`map_painter.dart`の`_seaColor`等）。詳細・データ取得の教訓は`TASKS.md`「海岸線データ1:50m化」「配色の暫定変更」参照。
+**海岸線データの1:50m化・配色の暫定変更**（2026-07-27）— 前回セッションでは取得不可と判断していたNatural Earth 1:50mデータを、`registry.npmjs.org`経由（`world-atlas@1.1.4`）で取得できることを発見し、`coastline.json`を1:110m（14ポリゴン/約300点）から1:50m（123ポリゴン/約3,000点）に差し替え。差し替え前にmatplotlibで描画して形状を目視確認済み。あわせて陸海の配色を仮の白／灰色から、ナビチャート風（淡い青の海／ベージュの陸）へ暫定変更（`map_painter.dart`の`_seaColor`等）。詳細・データ取得の教訓は`docs/devlog-map-design.md`参照。
 
-**海岸線・配色のユーザー確認完了、グリッドラベルの追従表示化**（2026-07-27）— 上記の海岸線1:50m化・配色変更をユーザーが実機で確認し「とても良い」と確定。あわせて新規フィードバック（緯度経度グリッドラベルがズーム/パンで画面外に出る）に対応：`map_painter.dart`の`_drawGrid`からラベル描画を削除しグリッド線のみに変更、`map_screen.dart`に`_buildGridLabelOverlay`を新設し、`TransformationController`を直接listenする`AnimatedBuilder`でラベルを画面端（緯度＝左端、経度＝上端）に追従表示するオーバーレイ方式に変更。ドラッグ中もリアルタイムに追従するよう、既存の`_zoom`/`_translation`状態（interaction終了時のみ更新）ではなくコントローラー自体を直接参照する設計にした。詳細は`TASKS.md`「グリッドラベルの追従表示化」参照。
+**海岸線・配色のユーザー確認完了、グリッドラベルの追従表示化**（2026-07-27）— 上記の海岸線1:50m化・配色変更をユーザーが実機で確認し「とても良い」と確定。あわせて新規フィードバック（緯度経度グリッドラベルがズーム/パンで画面外に出る）に対応：`map_painter.dart`の`_drawGrid`からラベル描画を削除しグリッド線のみに変更、`map_screen.dart`に`_buildGridLabelOverlay`を新設し、`TransformationController`を直接listenする`AnimatedBuilder`でラベルを画面端（緯度＝左端、経度＝上端）に追従表示するオーバーレイ方式に変更。ドラッグ中もリアルタイムに追従するよう、既存の`_zoom`/`_translation`状態（interaction終了時のみ更新）ではなくコントローラー自体を直接参照する設計にした。詳細は`docs/devlog-map-overlays.md`参照。
 
-**カーソル位置緯度経度の表示・船アイコンの向き変更**（2026-07-27）— `MapBounds`に`toOffset`の逆変換`fromOffset`（Web Mercator逆変換）を追加し往復精度をPythonで事前検証。`map_screen.dart`に`MouseRegion`を追加し、カーソル位置の緯度経度を画面右下（ズームボタン列と重ならない位置）に「31-15.5N 140-23.4E」形式（度-分.小数、秒は分の小数へ換算）で追従表示。船アイコンは、`MapPainter`に`nextWaypoint`を追加し、現在の船位置から次のWPへの方位角をキャンバス座標上で計算して三角形を回転させる方式に変更（三角形の形自体は現状維持、頂点が常に次のWPを向く）。詳細は`TASKS.md`「カーソル位置緯度経度の表示」「船アイコンの向き変更」参照。
+**カーソル位置緯度経度の表示・船アイコンの向き変更**（2026-07-27）— `MapBounds`に`toOffset`の逆変換`fromOffset`（Web Mercator逆変換）を追加し往復精度をPythonで事前検証。`map_screen.dart`に`MouseRegion`を追加し、カーソル位置の緯度経度を画面右下（ズームボタン列と重ならない位置）に「31-15.5N 140-23.4E」形式（度-分.小数、秒は分の小数へ換算）で追従表示。船アイコンは、`MapPainter`に`nextWaypoint`を追加し、現在の船位置から次のWPへの方位角をキャンバス座標上で計算して三角形を回転させる方式に変更（三角形の形自体は現状維持、頂点が常に次のWPを向く）。詳細は`docs/devlog-map-overlays.md`参照。
 
-**起動用batファイルの作成**（2026-07-27）— プロジェクトルートに`run_windows.bat`を新規作成。ダブルクリックで`typhoon_ship_tracker/`に移動し`flutter run -d windows`を実行、終了後は`pause`でウィンドウを保持。`.bat`納品前チェックリスト（CRLF変換／括弧ネストなし／日本語直書きなし）を確認済み。あわせて`commit.bat`の`git add`対象に`run_windows.bat`を追加し、`typhoon_ship_tracker`丸ごと追加から今回変更した個別ファイル列挙に変更（`windows/`配下等のCRLFノイズを巻き込まないため）。詳細は`TASKS.md`「起動用batファイル」参照。
+**起動用batファイルの作成**（2026-07-27）— プロジェクトルートに`run_windows.bat`を新規作成。ダブルクリックで`typhoon_ship_tracker/`に移動し`flutter run -d windows`を実行、終了後は`pause`でウィンドウを保持。`.bat`納品前チェックリスト（CRLF変換／括弧ネストなし／日本語直書きなし）を確認済み。あわせて`commit.bat`の`git add`対象に`run_windows.bat`を追加し、`typhoon_ship_tracker`丸ごと追加から今回変更した個別ファイル列挙に変更（`windows/`配下等のCRLFノイズを巻き込まないため）。
 
 **CLAUDE.mdの記録漏れ修正**（2026-07-27）— セッション終了前の確認で、「プロジェクト雛形の現状」（`windows/`未生成のまま止まっていた記載）と「海岸線データ」（1:110mのまま止まっていた記載）が実態と食い違っていることを発見し修正。`windows/`は2026-07-26に生成・コミット済み（commit `5935e4f`）であることをgit logで確認、海岸線は本セッションで1:50mに更新済みであることを反映。
 
@@ -45,20 +45,20 @@
 
 **index.lock残留の原因調査・再発防止ルール策定**（2026-07-27）— 上記の`commit.bat`失敗の根本原因をユーザー依頼で追及。原因は、Coworkサンドボックスから確認目的で実行した読み取り専用の`git status`が、終了時に自分で作った`.git/index.lock`を削除しようとして権限エラーで失敗し（サンドボックスからのファイル削除失敗という既知の癖と同根）、その警告を「コミットしていないから無関係」と誤って軽視・放置したこと。Agentツール（general-purpose）による独立レビューで、対象を`index.lock`だけでなく`.git`配下の`*.lock`全般に広げるべき、警告の有無に関わらず機械的に確認すべき、という指摘を得て反映。再発防止ルールを`docs/operation-rules.md`「サンドボックスからのgitコマンド実行によるロックファイル残留」と`docs/flutter-windows-env-notes.md`（一般的な注意7）に記載。
 
-**時刻スライダー上限のデータ駆動化・再生バーのWindy風デザイン化**（2026-07-25）— 時刻スライダーの上限を72hのハードコードから台風予報データ（`_typhoonTrack`）の最後の点から算出するデータ駆動方式に変更（JMA VPTW60の5日＝120h予報にそのまま対応、将来のJTWCデータ追加時もコード変更不要）。あわせて再生バーをWindyアプリ風のデザイン（オレンジ色の「HH:MM」バブル追従表示、最下段に「dd mmm」形式の日付セグメント行、当日ハイライト、タップでジャンプ）に刷新。詳細は`TASKS.md`「時刻スライダー上限のデータ駆動化・再生バーのデザイン変更」参照。
+**時刻スライダー上限のデータ駆動化・再生バーのWindy風デザイン化**（2026-07-25）— 時刻スライダーの上限を72hのハードコードから台風予報データ（`_typhoonTrack`）の最後の点から算出するデータ駆動方式に変更（JMA VPTW60の5日＝120h予報にそのまま対応、将来のJTWCデータ追加時もコード変更不要）。あわせて再生バーをWindyアプリ風のデザイン（オレンジ色の「HH:MM」バブル追従表示、最下段に「dd mmm」形式の日付セグメント行、当日ハイライト、タップでジャンプ）に刷新。
 
-**距離表示を船の後方へ追従表示化**（2026-07-28）— 船・台風間の距離ラベルを、中間点表示→船の左側固定表示（第1段階）を経て、最終的に船の進行方向の逆側（後方）に追従表示するよう変更（濃い青灰色の塗りつぶし＋白文字の囲み付きで海・陸どちらの背景でも視認可能）。西進時に「左側固定」だと不自然になりうるとの気づきを受けての再変更。詳細は`TASKS.md`「距離表示の位置変更」参照。
+**距離表示を船の後方へ追従表示化**（2026-07-28）— 船・台風間の距離ラベルを、中間点表示→船の左側固定表示（第1段階）を経て、最終的に船の進行方向の逆側（後方）に追従表示するよう変更（濃い青灰色の塗りつぶし＋白文字の囲み付きで海・陸どちらの背景でも視認可能）。西進時に「左側固定」だと不自然になりうるとの気づきを受けての再変更。
 
-**サンプル航海計画にWP追加**（2026-07-28）— 変針後の船アイコン向き・距離表示追従（上記）を確認できるよう、仮の航海計画データ（`_shipTrack`）を1レグ（2点）から5レグ（6点・+120hまで）に拡張。西向きのレグも含め、複数方向での見た目を確認できるようにした。詳細は`TASKS.md`「サンプル航海計画へのWP追加」参照。
+**サンプル航海計画にWP追加**（2026-07-28）— 変針後の船アイコン向き・距離表示追従（上記）を確認できるよう、仮の航海計画データ（`_shipTrack`）を1レグ（2点）から5レグ（6点・+120hまで）に拡張。西向きのレグも含め、複数方向での見た目を確認できるようにした。
 
-**船名・台風ラベルの追加**（2026-07-28）— 船のラベルをユーザー入力の「Ship's Name」で表示できるAppBarダイアログを追加（NAVTOR規格CSVに船名列が無いための代替入力）。あわせて`lib/utils/jtwc_parser.dart`を新規作成し、JTWC警報テキストから正規表現で番号・名称（例：「11W (NOUL)」）を抽出して台風ラベルに反映する仕組みを追加。`MapPainter`に`shipLabel`/`typhoonLabel`パラメータを追加。詳細は`TASKS.md`「船名・台風ラベルの追加」参照。
+**船名・台風ラベルの追加**（2026-07-28）— 船のラベルをユーザー入力の「Ship's Name」で表示できるAppBarダイアログを追加（NAVTOR規格CSVに船名列が無いための代替入力）。あわせて`lib/utils/jtwc_parser.dart`を新規作成し、JTWC警報テキストから正規表現で番号・名称（例：「11W (NOUL)」）を抽出して台風ラベルに反映する仕組みを追加。`MapPainter`に`shipLabel`/`typhoonLabel`パラメータを追加。抽出仕様は`docs/data-format-notes.md`参照。
 
-**複数台風対応・気圧表示・Displayトグル**（2026-07-28）— Menuダイアログを最大3台風分の貼り付け欄に拡張し、それぞれ独立にJTWC警報テキストから番号・名称・中心気圧（例：「980hPa」）・現在位置を抽出する仕組みに拡張（`jtwc_parser.dart`の`JtwcTyphoonInfo`/`parseJtwcWarningText`に統合）。台風1は従来通りサンプル予報進路で時刻追従、台風2・3は予報進路を持たない静的マーカー（`ExtraTyphoon`、`map_painter.dart`）として表示。あわせて船・台風（最大3）それぞれにDisplay ON/OFFチェックボックスを追加し、`MapPainter`の`showShip`/`showPrimaryTyphoon`/`extraTyphoons`で表示制御。詳細は`TASKS.md`「複数台風・気圧表示・Displayトグル」参照。
+**複数台風対応・気圧表示・Displayトグル**（2026-07-28）— Menuダイアログを最大3台風分の貼り付け欄に拡張し、それぞれ独立にJTWC警報テキストから番号・名称・中心気圧（例：「980hPa」）・現在位置を抽出する仕組みに拡張（`jtwc_parser.dart`の`JtwcTyphoonInfo`/`parseJtwcWarningText`に統合）。台風1は従来通りサンプル予報進路で時刻追従、台風2・3は予報進路を持たない静的マーカー（`ExtraTyphoon`、`map_painter.dart`）として表示。あわせて船・台風（最大3）それぞれにDisplay ON/OFFチェックボックスを追加し、`MapPainter`の`showShip`/`showPrimaryTyphoon`/`extraTyphoons`で表示制御。抽出仕様は`docs/data-format-notes.md`参照。
 
-**台風軌跡の常時表示化・予報点抽出**（2026-07-28）— 上記へのフィードバックを受け、台風の軌跡を船のルートと同様に過去〜未来の全区間を常時表示するよう刷新。読み込み時の最低気圧ラベルは軌跡の最初の点に固定し、再生で時刻が進んでも番号・名称ラベルのみが現在位置に追従する仕様に変更。あわせてJTWCテキストの12/24/36/48/60時間予報点を正規表現で抽出（`JtwcForecastPoint`）し、静的マーカーだった台風2・3にも実際の軌跡を持たせられるように拡張。`ExtraTyphoon`と主台風専用フィールドを`TyphoonMarker`に統合。詳細は`TASKS.md`「台風軌跡の常時表示化・予報点抽出」参照。
+**台風軌跡の常時表示化・予報点抽出**（2026-07-28）— 上記へのフィードバックを受け、台風の軌跡を船のルートと同様に過去〜未来の全区間を常時表示するよう刷新。読み込み時の最低気圧ラベルは軌跡の最初の点に固定し、再生で時刻が進んでも番号・名称ラベルのみが現在位置に追従する仕様に変更。あわせてJTWCテキストの12/24/36/48/60時間予報点を正規表現で抽出（`JtwcForecastPoint`）し、静的マーカーだった台風2・3にも実際の軌跡を持たせられるように拡張。`ExtraTyphoon`と主台風専用フィールドを`TyphoonMarker`に統合。予報点の抽出仕様は`docs/data-format-notes.md`参照。
 
-**再生開始時刻の発表時間化**（2026-07-28）— 再生開始時刻（`_startTime`）を「現在時刻」固定から「読み込んだTyphoon 1の発表時間」（JTWC警報の`WARNING POSITION`行の`DDHHMMZ`をJSTへ変換）に変更。`jtwc_parser.dart`に`issuedAtJst`を追加し、`map_screen.dart`の`_startTime`を可変化、依存する`_shipTrack`/`_typhoonTrackFallback`をゲッター化して再計算されるようにした。詳細は`TASKS.md`「再生開始時刻の発表時間化」参照。
+**再生開始時刻の発表時間化**（2026-07-28）— 再生開始時刻（`_startTime`）を「現在時刻」固定から「読み込んだTyphoon 1の発表時間」（JTWC警報の`WARNING POSITION`行の`DDHHMMZ`をJSTへ変換）に変更。`jtwc_parser.dart`に`issuedAtJst`を追加し、`map_screen.dart`の`_startTime`を可変化、依存する`_shipTrack`/`_typhoonTrackFallback`をゲッター化して再計算されるようにした。発表時刻の解決仕様は`docs/data-format-notes.md`参照。
 
-**再生スピード調整**（2026-07-28）— 再生スピードを25%〜150%（デフォルト50%）でAppBarから調整できるダイアログを追加。詳細は`TASKS.md`「再生スピード調整」参照。
+**再生スピード調整**（2026-07-28）— 再生スピードを25%〜150%（デフォルト50%）でAppBarから調整できるダイアログを追加。
 
-**マウスホイールズームの不具合修正**（2026-07-28、3往復）— マウスホイールでのズームアウトが最小まで届かない不具合を調査。1回目（`PointerSignalResolver`経由での登録）は効果なし、2回目で独自のホイール処理を撤去し`InteractiveViewer`本来の処理に一本化（副作用対応として`_transformationController`への永続リスナーを追加）、3回目でズーム最小値を「cover」フィット基準（新設`_coverFitScale`）に変更しホイール・ボタン・スライダーの限界を統一。経緯・原因・教訓は`docs/devlog-wheel-zoom.md`に集約。詳細は`TASKS.md`「マウスホイールズームの不具合」参照。
+**マウスホイールズームの不具合修正**（2026-07-28、3往復）— マウスホイールでのズームアウトが最小まで届かない不具合を調査。1回目（`PointerSignalResolver`経由での登録）は効果なし、2回目で独自のホイール処理を撤去し`InteractiveViewer`本来の処理に一本化（副作用対応として`_transformationController`への永続リスナーを追加）、3回目でズーム最小値を「cover」フィット基準（新設`_coverFitScale`）に変更しホイール・ボタン・スライダーの限界を統一。経緯・原因・教訓は`docs/devlog-wheel-zoom.md`に集約。
