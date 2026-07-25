@@ -1,6 +1,6 @@
 @echo off
 cd /d "%~dp0"
-git add CLAUDE.md TASKS.md commit.bat run_windows.bat
+git add CLAUDE.md TASKS.md commit.bat run_windows.bat clean_project.bat
 git add docs/completed-log.md docs/operation-rules.md docs/devlog-map-design.md
 git add docs/data-format-notes.md docs/devlog-map-overlays.md docs/devlog-wheel-zoom.md
 git add typhoon_ship_tracker/.gitignore typhoon_ship_tracker/README.md typhoon_ship_tracker/test/widget_test.dart
