@@ -64,3 +64,5 @@
 **clean_project.batの作成**（2026-07-25）— Androidアプリ開発での既存の習慣（ビルド肥大化対策）を踏襲し、プロジェクトフォルダ直下に`clean_project.bat`を新設。`typhoon_ship_tracker/`で`flutter clean`を実行し`build/`・`.dart_tool/`を削除する。作成時点で実測`build/`228MB・`.dart_tool/`42MBだったが、ユーザーが実行後に両フォルダとも削除されていることを確認済み。実行タイミングはユーザーの任意（習慣化済みのため定期実行の仕組み化は不要と判断）。
 
 **マウスホイールズームの不具合修正**（2026-07-28、3往復）— マウスホイールでのズームアウトが最小まで届かない不具合を調査。1回目（`PointerSignalResolver`経由での登録）は効果なし、2回目で独自のホイール処理を撤去し`InteractiveViewer`本来の処理に一本化（副作用対応として`_transformationController`への永続リスナーを追加）、3回目でズーム最小値を「cover」フィット基準（新設`_coverFitScale`）に変更しホイール・ボタン・スライダーの限界を統一。経緯・原因・教訓は`docs/devlog-wheel-zoom.md`に集約。
+
+**表示エリアの東西範囲拡張（東経70°〜180°、後に85°〜170°へ微調整）**（2026-07-25）— TASKS.mdで決定待ちだった東西表示範囲拡張が決定し対応。`MapBounds`（`lib/utils/map_bounds.dart`）の`minLon`/`maxLon`を115/150から70/180に変更（緯度N5-50は変更なし）。海岸線データも同じNatural Earth 1:50mソース・手法（`registry.npmjs.org`経由でworld-atlas取得→TopoJSON手動デコード→shapelyでunion・クリップ・簡略化）でE70-180に再クリップ。その後ユーザーの好み（技術的理由ではなく見た目の好み）で東経85°〜170°に絞り込み確定（緯度は変更なし）。最終的な海岸線データは198ポリゴン・約4,510点・~73KB。クリップ後にmatplotlibで形状を目視確認済み。グリッド線・グリッドラベルオーバーレイは`MapBounds.minLon/maxLon`を動的参照する設計だったため、コード変更不要で表示範囲変更に追従することを確認済み。詳細は`typhoon_ship_tracker/assets/coastline/README.md`参照。

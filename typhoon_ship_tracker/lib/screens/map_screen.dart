@@ -369,7 +369,7 @@ class _MapScreenState extends State<MapScreen> {
   // time only — centers the initial view on MapBounds.defaultCenterLat/Lon
   // (roughly the middle of Japan) at a zoomed-in level, per the 2026-07-26
   // decision to always start on a recognizable view rather than the whole
-  // N5-50/E115-150 range zoomed all the way out.
+  // N5-50/E85-170 range zoomed all the way out.
   //
   // Called from build() via LayoutBuilder, which runs during layout — so
   // this only does plain field mutation here (safe: nothing has read these
