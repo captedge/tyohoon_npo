@@ -74,10 +74,11 @@ class JtwcTyphoonInfo {
       positionValidDay == null;
 
   /// Resolves the "WARNING POSITION" valid time to a concrete JST DateTime,
-  /// e.g. "250000Z" → 25th 09:00 JST. Uses [reference]'s year and month
-  /// since JTWC bulletins give only day/hour/minute — pass in the real
-  /// current date (not a previously-resolved _startTime) to avoid drift if
-  /// this is called again later. Returns null if no such line was parsed.
+  /// e.g. "250000Z" → 25th 09:00 JST. JTWC bulletins give only day/hour/
+  /// minute, no month/year, so [reference] (pass in the real current date,
+  /// not a previously-resolved _startTime, to avoid drift if this is called
+  /// again later) is used to disambiguate which month/year the bare "day"
+  /// number belongs to. Returns null if no such line was parsed.
   ///
   /// Deliberately builds a plain (non-UTC-tagged) DateTime whose fields
   /// directly represent the JST wall-clock time, computing the UTC→JST
@@ -92,6 +93,29 @@ class JtwcTyphoonInfo {
   /// JST", which shifted the playback bar's day boundaries by a day even
   /// though the displayed HH:MM (read via raw field access, unaffected by
   /// the UTC tag) still looked correct.
+  ///
+  /// Month/year disambiguation (2026-07-27 fix): simply combining `day +
+  /// dayCarry` with [reference]'s month/year (letting DateTime's own
+  /// overflow normalization handle a month-end rollover, e.g. day 32 →
+  /// the 1st/2nd of the next month) only works while [reference] is still
+  /// in the *same* month the warning's bare day number belongs to. Once the
+  /// device's calendar has itself already rolled over to the next month by
+  /// the time the text is pasted in — e.g. a "311800Z" (31st) warning
+  /// entered when the PC reads "8/1 03:30" — [reference].month is already
+  /// the *next* month, so combining it with `day` (31) double-advances
+  /// (July 31 + 9h JST = Aug 1, but `DateTime(<Aug>, 32, ...)` normalizes to
+  /// Sep 1, one month too far). To handle this, two candidate dates are
+  /// built — one using [reference]'s month, one using the month before it
+  /// (with automatic year rollover for a December→January boundary) — and
+  /// whichever candidate is not more than [_futureTolerance] ahead of
+  /// [reference], and is the more recent of the two such candidates, is
+  /// used. Since JTWC warnings always describe a very recent (same-day or
+  /// previous-day) position, exactly one of the two candidates should
+  /// satisfy "not implausibly far in the future" in the normal case; when
+  /// both do (the common case, no month boundary involved), the more recent
+  /// one is simply the correct same-month reading.
+  static const _futureTolerance = Duration(hours: 6);
+
   DateTime? issuedAtJst(DateTime reference) {
     final day = positionValidDay;
     if (day == null) return null;
@@ -99,13 +123,28 @@ class JtwcTyphoonInfo {
     final jstMinutesOfDay = utcMinutesOfDay + 9 * 60;
     final dayCarry = jstMinutesOfDay ~/ (24 * 60);
     final minuteOfDay = jstMinutesOfDay % (24 * 60);
-    return DateTime(
-      reference.year,
-      reference.month,
-      day + dayCarry,
-      minuteOfDay ~/ 60,
-      minuteOfDay % 60,
-    );
+    final hour = minuteOfDay ~/ 60;
+    final minute = minuteOfDay % 60;
+
+    DateTime candidateFor(int year, int month) {
+      return DateTime(year, month, day + dayCarry, hour, minute);
+    }
+
+    final sameMonthCandidate = candidateFor(reference.year, reference.month);
+    final previousMonth = reference.month == 1 ? 12 : reference.month - 1;
+    final previousMonthYear = reference.month == 1 ? reference.year - 1 : reference.year;
+    final previousMonthCandidate = candidateFor(previousMonthYear, previousMonth);
+
+    final futureLimit = reference.add(_futureTolerance);
+    DateTime? best;
+    for (final candidate in [sameMonthCandidate, previousMonthCandidate]) {
+      if (candidate.isAfter(futureLimit)) continue;
+      if (best == null || candidate.isAfter(best)) best = candidate;
+    }
+    // Fall back to the same-month reading if both candidates somehow land
+    // in the future (shouldn't happen for a real warning text, but avoids
+    // returning null and silently discarding the resolved start time).
+    return best ?? sameMonthCandidate;
   }
 
   /// Summary text for the settings dialog, e.g. "11W (NOUL) · 980hPa · 5
@@ -128,8 +167,16 @@ class JtwcTyphoonInfo {
 /// warning missing e.g. a REPEAT POSIT line (unusual, but not something to
 /// hard-fail the whole paste over) still yields whatever else parsed.
 JtwcTyphoonInfo parseJtwcWarningText(String text) {
+  // Matches any JTWC intensity classification, not just "TYPHOON" — a
+  // warning can be issued for a system at any stage (2026-07-27 report:
+  // "TROPICAL STORM 12W (DOLPHIN)" was rejected because the old pattern
+  // only matched the literal word "TYPHOON"). The number/name pair is what
+  // this app actually needs (designation); the classification word itself
+  // is intentionally discarded — the user wants every stage tracked the
+  // same way ("台風として認識して構わない"), not labeled by category.
   final designationMatch = RegExp(
-    r'TYPHOON\s+(\d+[A-Z])\s*\(([^)]+)\)',
+    r'(?:SUPER\s+TYPHOON|TYPHOON|SEVERE\s+TROPICAL\s+STORM|TROPICAL\s+STORM|TROPICAL\s+DEPRESSION)'
+    r'\s+(\d+[A-Z])\s*\(([^)]+)\)',
     caseSensitive: false,
   ).firstMatch(text);
   final designation = designationMatch == null

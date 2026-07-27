@@ -123,14 +123,38 @@ class _MapScreenState extends State<MapScreen> {
   // (positionAt clamps to the last point past a track's time range) rather
   // than the slider being artificially cut short.
   double get _maxOffsetHours {
-    var maxHours = 0.0;
+    var shipMaxHours = 0.0;
+    var anyShipInFuture = false;
     for (final entry in _activeShipTracks) {
       final points = entry.track;
       if (points.isEmpty) continue;
       final hours = points.last.time.difference(_startTime).inMinutes / 60.0;
-      if (hours > maxHours) maxHours = hours;
+      if (hours > 0) anyShipInFuture = true;
+      if (hours > shipMaxHours) shipMaxHours = hours;
     }
-    return maxHours;
+    if (anyShipInFuture) return shipMaxHours;
+
+    // Fallback (2026-07-27 bug fix): every currently-displayed ship track's
+    // arrival already falls before _startTime — e.g. a Passage Plan
+    // registered/persisted for an earlier voyage is left Display-on while a
+    // newer typhoon warning (with a later resolved _startTime — see
+    // JtwcTyphoonInfo.issuedAtJst) is loaded on top of it, as happened when
+    // testing the month-boundary date fix. The ship-only rule above (2026-
+    // 08-10 decision, kept unchanged for the normal case above) would then
+    // hide the playback bar entirely (_buildTimelineTrack returns nothing
+    // when this is <= 0), leaving no way to even scrub through the loaded
+    // typhoon's own track. Falling back to the furthest-reaching
+    // Display-on typhoon's last forecast point keeps the bar usable for
+    // that instead of a total blackout.
+    var typhoonMaxHours = 0.0;
+    for (var i = 0; i < _typhoonSlots.length; i++) {
+      if (!_typhoonSlots[i].displayEnabled) continue;
+      final points = _trackPointsForSlot(i);
+      if (points == null || points.isEmpty) continue;
+      final hours = points.last.time.difference(_startTime).inMinutes / 60.0;
+      if (hours > typhoonMaxHours) typhoonMaxHours = hours;
+    }
+    return typhoonMaxHours;
   }
 
   double _offsetHours = 24;
@@ -275,6 +299,12 @@ class _MapScreenState extends State<MapScreen> {
         label: slot.info.designation ?? 'Typhoon',
         pressureLabel: slot.info.centralPressureHpa == null ? null : '${slot.info.centralPressureHpa}hPa',
         showRings: slot.ringsEnabled,
+        // Parallel to `track`, same order (2026-07-27 request: show each
+        // forecast point's valid time, e.g. "27/15" for JTWC's "270600Z",
+        // next to its circle). `points` is already ordered/aligned with the
+        // `track` list above (both derived from the same `_trackPointsForSlot`
+        // call), so a plain `.time` map keeps them in lockstep.
+        trackTimes: points.map((p) => p.time).toList(),
       ));
     }
     return markers;
@@ -318,7 +348,7 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   // Restores registered Passage Plans / typhoon slots / ship name / playback
-  // speed from the previous session (2026-08-xx request: "アプリを閉じ、また
+  // speed from the previous session (2026-07-27 request: "アプリを閉じ、また
   // 開いた場合に直前の入力済の登録情報が読み込まれるように"). Runs once at
   // startup, async (SharedPreferences I/O), so the first frame(s) still show
   // the empty/sample state until this resolves — same pattern already used

@@ -5,7 +5,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/ship_waypoint.dart';
 import '../models/voyage_plan_entry.dart';
 
-/// Persists/restores the user's registered-info state (2026-08-xx request:
+/// Persists/restores the user's registered-info state (2026-07-27 request:
 /// "アプリを閉じてまた開いた場合に直前の入力済み登録情報が読み込まれるように
 /// したい") so the ship name, registered Passage Plans, pasted typhoon
 /// warning texts, and a couple of UI settings survive an app restart.

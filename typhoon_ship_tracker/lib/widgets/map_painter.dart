@@ -31,6 +31,19 @@ class TyphoonMarker {
   final String label;
   final String? pressureLabel;
 
+  /// Valid time for each point in [track], same length/order as [track]
+  /// (2026-07-27 request: show each forecast point's time — e.g. JTWC's
+  /// "270600Z" — as "27/15" (day/hour, JST) next to its circle). These are
+  /// already JST wall-clock values by the time they reach this painter: the
+  /// caller (map_screen.dart) builds every [TrackPoint.time] as an offset
+  /// from `_startTime`, which is itself resolved from the warning's
+  /// "DDHHMMZ" line via [JtwcTyphoonInfo.issuedAtJst] (UTC→JST, +9h) — so
+  /// reading `.day`/`.hour` directly here (no further conversion) gives the
+  /// correct JST day/hour, consistent with how every other DateTime in this
+  /// app is treated as a plain wall-clock value (see issuedAtJst's doc
+  /// comment for why `DateTime.utc(...)` is deliberately avoided app-wide).
+  final List<DateTime> trackTimes;
+
   /// Whether to draw the 100nm/200nm distance rings around
   /// [currentPosition] (2026-08-14 request). Off by default; toggled either
   /// from the AppBar's rings menu or by tapping the typhoon's red icon on
@@ -46,6 +59,7 @@ class TyphoonMarker {
     required this.label,
     this.pressureLabel,
     this.showRings = false,
+    this.trackTimes = const [],
   });
 }
 
@@ -336,9 +350,43 @@ class MapPainter extends CustomPainter {
       ..color = Colors.deepOrange.shade900
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
-    for (final p in typhoon.track) {
-      _drawFixedCircle(canvas, MapBounds.toOffset(p.latitude, p.longitude), 5, markerPaint, markerBorder);
+    const dotRadius = 5.0;
+    for (var i = 0; i < typhoon.track.length; i++) {
+      final p = typhoon.track[i];
+      final o = MapBounds.toOffset(p.latitude, p.longitude);
+      _drawFixedCircle(canvas, o, dotRadius, markerPaint, markerBorder);
+      if (i < typhoon.trackTimes.length) {
+        _drawForecastPointTime(canvas, o, dotRadius, typhoon.trackTimes[i]);
+      }
     }
+  }
+
+  // Forecast point time label ("27/15" = day/hour, JST — 2026-07-27
+  // request: "12W (DOLPHIN)で言えば、270600Z→27/15"), placed to the right of
+  // each forecast point's circle. Same fixed-on-screen-size treatment and
+  // font size as the Range Ring labels ("同じ大きさでズームしても...同じ
+  // 大きさ" — user asked for visual consistency with those), but black
+  // ("文字色は黒とする") rather than the ring's teal/purple, since this isn't
+  // tied to a specific ring's color.
+  static const _forecastTimeLabelStyle = TextStyle(
+    color: Colors.black,
+    fontSize: 9,
+    fontWeight: FontWeight.w600,
+  );
+
+  void _drawForecastPointTime(Canvas canvas, Offset center, double dotRadius, DateTime time) {
+    final dd = time.day.toString().padLeft(2, '0');
+    final hh = time.hour.toString().padLeft(2, '0');
+    final painter = TextPainter(
+      text: TextSpan(text: '$dd/$hh', style: _forecastTimeLabelStyle),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.scale(_invZoom);
+    const gap = 3.0; // clearance from the dot's edge
+    painter.paint(canvas, Offset(dotRadius + gap, -painter.height / 2));
+    canvas.restore();
   }
 
   void _drawDistanceLine(Canvas canvas, LatLng shipPosition, LatLng typhoonPosition) {

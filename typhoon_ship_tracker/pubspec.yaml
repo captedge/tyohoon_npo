@@ -13,7 +13,7 @@ dependencies:
   # CSVファイル選択ダイアログ（航海計画CSVインポート用、Windowsデスクトップ対応）
   file_picker: ^8.1.2
   # 登録済み情報（Passage Plan・台風情報・船名・UI設定）を次回起動時に読み込むための永続化
-  # （2026-08-xx追加）。Windows実装（shared_preferences_windows）はJSONファイルへの
+  # （2026-07-27追加）。Windows実装（shared_preferences_windows）はJSONファイルへの
   # プレーンなDart file I/Oのみで追加のネイティブビルドは不要。symlinkサポート
   # （Developer Mode）はfile_picker追加時に既に有効化済みのため追加要件なし
   # （docs/flutter-windows-env-notes.md 既知の癖8参照）。

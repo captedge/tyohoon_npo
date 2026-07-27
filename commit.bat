@@ -1,6 +1,7 @@
 @echo off
 cd /d "%~dp0"
 git add -u
+git add build_release.bat
 git add docs/devlog-map-zoom-rendering.md docs/devlog-passage-plan-multi.md
 git add typhoon_ship_tracker/assets/ship_icon01.png typhoon_ship_tracker/assets/typhoon_icon01.png
 git add typhoon_ship_tracker/lib/models/ship_waypoint.dart typhoon_ship_tracker/lib/models/voyage_plan_entry.dart
