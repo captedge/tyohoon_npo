@@ -12,3 +12,7 @@ commit_message.txt
 # OS
 .DS_Store
 Thumbs.db
+
+# 配布用ビルド生成物（build_release.batの出力、大容量のためgit管理対象外）
+/TyphoonShipTracker/
+/TyphoonShipTracker.zip

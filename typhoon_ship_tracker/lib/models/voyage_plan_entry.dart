@@ -15,12 +15,28 @@ class VoyagePlanEntry {
     required this.waypoints,
     required this.departureTime,
     this.displayEnabled = true,
+    this.sourceCsvFileName,
   });
 
   /// Defaults to the imported CSV's filename (without extension) when first
   /// registered. Purely a label for the Passage Plan list — not used in any
   /// position/distance calculation.
   String name;
+
+  /// The CSV library filename (with extension — see `CsvLibrary`) this plan
+  /// was registered from via "Import CSV" or "Select CSV", or null for
+  /// plans registered before this field existed (2026-07-27 addition).
+  /// Used only to find which registered plan(s) to cascade-delete when the
+  /// same file is deleted from the library via "Edit CSV" (2026-07-27
+  /// request: "Editで削除：Passage Planに残っている場合は...削除して良いですか
+  /// Y/N、残っていない場合は質問なしで削除") — not read anywhere else.
+  /// Deliberately *not* kept in sync when the library file is renamed (the
+  /// user separately confirmed renaming should not affect an already-
+  /// registered plan's own name/data) — so renaming a source file after
+  /// registering from it "orphans" this link; the plan itself is
+  /// unaffected, it just won't be found for cascade-delete against its new
+  /// filename.
+  String? sourceCsvFileName;
 
   List<ShipWaypoint> waypoints;
 

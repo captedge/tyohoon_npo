@@ -49,6 +49,7 @@ class AppStateStorage {
             'name': plan.name,
             'departureTime': plan.departureTime.toIso8601String(),
             'displayEnabled': plan.displayEnabled,
+            'sourceCsvFileName': plan.sourceCsvFileName,
             'waypoints': [
               for (final wp in plan.waypoints)
                 {
@@ -95,6 +96,10 @@ class AppStateStorage {
           waypoints: waypoints,
           departureTime: DateTime.parse(planMap['departureTime'] as String),
           displayEnabled: planMap['displayEnabled'] as bool? ?? true,
+          // Absent for plans saved before this field existed (2026-07-27) —
+          // null is the correct "unknown source" value for those, same as
+          // a freshly-constructed VoyagePlanEntry with no source given.
+          sourceCsvFileName: planMap['sourceCsvFileName'] as String?,
         ));
       }
       final typhoonSlots = <TyphoonSlotSnapshot>[

@@ -12,6 +12,7 @@ import '../models/track_point.dart';
 import '../models/voyage_plan_entry.dart';
 import '../utils/app_state_storage.dart';
 import '../utils/coastline.dart';
+import '../utils/csv_library.dart';
 import '../utils/interpolation.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
@@ -23,9 +24,12 @@ import 'voyage_plan_screen.dart';
 
 /// Main screen: map view with zoom controls and a time slider/play button.
 ///
-/// Ship and typhoon tracks are placeholder sample data for now (see
-/// TODO(data) below) — real data will come from the CSV/Excel voyage plan
-/// and the JMA/JTWC typhoon feeds once those readers are implemented.
+/// Ship tracks come from registered Passage Plan CSVs and typhoon tracks
+/// come from pasted JTWC warning text — both entered manually until the
+/// real CSV/Excel voyage plan and JMA/JTWC feed readers are implemented (see
+/// TODO(data) below). Nothing is drawn, and the playback bar is hidden,
+/// until at least one of those is registered (2026-07-27 decision — no
+/// sample/placeholder data is shown by default).
 class MapScreen extends StatefulWidget {
   const MapScreen({super.key});
 
@@ -45,33 +49,14 @@ class _MapScreenState extends State<MapScreen> {
   // Falls back to device "now" until then, same as before.
   DateTime _startTime = DateTime.now();
 
-  // Several legs with varying headings (including a westward one, WP2→WP3
-  // below) so the heading-dependent ship icon rotation and "behind the
-  // ship" distance label (2026-07-28) can actually be exercised across a
-  // course change — a single-leg route can't show that.
-  //
-  // A getter (not `late final`) so it re-anchors to _startTime if that
-  // changes after this is first read (see above) instead of freezing at
-  // whatever _startTime was on first access. Used only as a fallback until
-  // a real voyage plan is imported — see _activeShipTracks/_voyagePlans
-  // below (2026-07-30 request: CSV import + departure-time entry + WP
-  // add/edit; 2026-08-xx: extended to multiple registered, independently
-  // drawn plans).
-  List<TrackPoint> get _shipTrackSample => [
-        TrackPoint(time: _startTime, latitude: 25.0, longitude: 121.0, label: 'Departure'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 20)), latitude: 24.0, longitude: 123.5, label: 'Waypoint 1'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 45)), latitude: 21.5, longitude: 124.0, label: 'Waypoint 2'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 70)), latitude: 19.0, longitude: 122.0, label: 'Waypoint 3'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 95)), latitude: 17.5, longitude: 124.5, label: 'Waypoint 4'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 120)), latitude: 16.0, longitude: 127.0, label: 'Waypoint 5'),
-      ];
-
   // Registered passage plans, imported from JRC ECDIS/NAVTOR route CSVs
   // and/or edited in VoyagePlanScreen (2026-07-30, extended 2026-08-xx to
   // support up to _maxVoyagePlans registered at once — e.g. separate legs
   // of a voyage with a port call in between). Empty until the user imports
-  // at least one — _activeShipTracks below falls back to _shipTrackSample
-  // until then, same pattern as the typhoon slots' fallback.
+  // at least one — _activeShipTracks below is simply empty until then
+  // (2026-07-27 decision: no sample/placeholder ship is drawn by default —
+  // see docs/completed-log.md for the reasoning). Same pattern as the
+  // typhoon slots below.
   static const int _maxVoyagePlans = 10;
   final List<VoyagePlanEntry> _voyagePlans = [];
 
@@ -90,17 +75,15 @@ class _MapScreenState extends State<MapScreen> {
   // Every track that should currently be drawn: one entry per Display-on
   // registered plan (2026-08-xx request — "船は一つ、プランは複数": compare
   // route options departing the same port/time to different destinations,
-  // each running fully independently), or the single sample fallback track
-  // when no plans are registered yet. Each entry pairs the track with the
-  // label to show for it (the plan's name, or the user-entered Ship's Name
-  // for the fallback). An earlier design concatenated Display-on plans into
-  // one combined track (for a port-call/multi-leg use case) — reverted once
-  // the user clarified the actual need was route *comparison*, not
-  // multi-leg concatenation; see docs/devlog-passage-plan-multi.md.
+  // each running fully independently). Empty when no plan is registered (or
+  // registered plans are all Display-off) — 2026-07-27 decision: no sample
+  // ship is drawn in that case (see docs/completed-log.md). Each entry pairs
+  // the track with the label to show for it (the plan's name). An earlier
+  // design concatenated Display-on plans into one combined track (for a
+  // port-call/multi-leg use case) — reverted once the user clarified the
+  // actual need was route *comparison*, not multi-leg concatenation; see
+  // docs/devlog-passage-plan-multi.md.
   List<({List<TrackPoint> track, String label})> get _activeShipTracks {
-    if (_voyagePlans.isEmpty) {
-      return [(track: _shipTrackSample, label: _shipLabel)];
-    }
     final result = <({List<TrackPoint> track, String label})>[];
     for (final plan in _voyagePlans) {
       if (!plan.displayEnabled) continue;
@@ -211,26 +194,20 @@ class _MapScreenState extends State<MapScreen> {
   ui.Image? _typhoonIcon;
 
   // User-entered ship name (2026-07-28 request: NAVTOR-format voyage-plan
-  // CSVs don't carry a ship name field, so it's entered here instead). See
-  // _shipLabel below and _showLabelSettingsDialog for entry. Only used as
-  // the label for the sample/fallback track (no Passage Plan registered
-  // yet) — once at least one plan is registered, each plan's own name is
-  // used instead (see _activeShipTracks). There used to also be a Display
-  // on/off toggle here (2026-07-28), but it became misleading once Passage
-  // Plan got its own per-entry Display checkboxes (2026-08-xx) — it looked
-  // like it still worked but was silently ignored whenever any plan was
-  // registered. Removed per user request; the sample/fallback track (used
-  // only when no plan is registered) is now always shown.
+  // CSVs don't carry a ship name field, so it's entered here instead).
+  // Currently unused for display (2026-07-27 decision: the sample/fallback
+  // ship track that used to show this as its label was removed — see
+  // docs/completed-log.md) — kept in the Information dialog and persisted
+  // in case a future use for it comes up; not read anywhere else right now.
   String _shipName = '';
-
-  String get _shipLabel => _shipName.trim().isEmpty ? 'Ship' : _shipName.trim();
 
   // Up to 3 typhoons (2026-07-28 request: "this area can have more than one
   // typhoon active at once"), each entered by pasting a JTWC warning text.
-  // Slot 0 falls back to a sample forecast track (_typhoonTrackFallback
-  // below) when nothing's been pasted yet, so the app still has something
-  // to demo; slots 1-2 only appear once real data is pasted for them. All
-  // 3 are otherwise treated the same — see _typhoonMarkers below.
+  // All 3 slots are treated the same — none has a sample/placeholder track
+  // (2026-07-27 decision: removed the slot-0 sample forecast that used to
+  // fill in until real data was pasted, see docs/completed-log.md); a slot
+  // simply has no track until real data is pasted for it. See
+  // _typhoonMarkers below.
   //
   // Default Display on/off (2026-07-27 request): only Ship and Typhoon 1 are
   // on at app launch — slots 1-2 default off since they have no data to show
@@ -240,31 +217,13 @@ class _MapScreenState extends State<MapScreen> {
     (i) => _TyphoonSlot()..displayEnabled = i == 0,
   );
 
-  // Sample forecast for slot 0 when no JTWC text has been pasted for it yet
-  // (renamed from _typhoonTrack, 2026-07-28, now that real pasted data can
-  // also drive slot 0 — see _trackPointsForSlot). Out to +120h (5 days),
-  // matching the JMA VPTW60 feed's forecast horizon (see TASKS.md). A
-  // getter for the same _startTime-re-anchoring reason as _shipTrackSample above.
-  List<TrackPoint> get _typhoonTrackFallback => [
-        TrackPoint(time: _startTime, latitude: 13.0, longitude: 126.0, label: 'Now'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 24)), latitude: 17.0, longitude: 124.0, label: '+24h'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 48)), latitude: 22.0, longitude: 123.0, label: '+48h'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 72)), latitude: 28.0, longitude: 124.0, label: '+72h'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 96)), latitude: 32.0, longitude: 126.0, label: '+96h'),
-        TrackPoint(time: _startTime.add(const Duration(hours: 120)), latitude: 35.0, longitude: 129.0, label: '+120h'),
-      ];
-
   // Builds the TrackPoint list a slot's track/current-position/timeline
-  // math should use: the sample fallback for slot 0 when it's empty, the
-  // parsed JTWC data (current position + forecast points, offset from
-  // _startTime — see JtwcForecastPoint) otherwise, or null when there's
-  // nothing to plot at all (empty non-primary slot, or a slot whose pasted
-  // text had no REPEAT POSIT line to anchor a position on).
+  // math should use: the parsed JTWC data (current position + forecast
+  // points, offset from _startTime — see JtwcForecastPoint), or null when
+  // there's nothing to plot yet (no JTWC text pasted for this slot, or a
+  // slot whose pasted text had no REPEAT POSIT line to anchor a position on).
   List<TrackPoint>? _trackPointsForSlot(int index) {
     final slot = _typhoonSlots[index];
-    if (index == 0 && slot.info.position == null && slot.info.forecastTrack.isEmpty) {
-      return _typhoonTrackFallback;
-    }
     final position = slot.info.position;
     if (position == null) return null;
     return [
@@ -759,6 +718,13 @@ class _MapScreenState extends State<MapScreen> {
                               child: Text('Typhoon ${i + 1}',
                                   style: const TextStyle(fontWeight: FontWeight.bold)),
                             ),
+                            TextButton(
+                              onPressed: () => setDialogState(() {
+                                typhoonControllers[i].clear();
+                                parseErrors[i] = null;
+                              }),
+                              child: const Text('Clear'),
+                            ),
                             displayCheckbox(
                               typhoonDisplayLocal[i],
                               (v) => setDialogState(() => typhoonDisplayLocal[i] = v ?? true),
@@ -910,7 +876,31 @@ class _MapScreenState extends State<MapScreen> {
       return;
     }
 
+    // Accumulate into the CSV library (2026-07-27 request: "同じファイルを
+    // 毎回外部から選び直すのではなく、取り込んだCSVを蓄積して後から選べる
+    // ようにしたい") before opening the departure-time screen, so a later
+    // "Select CSV" can reuse this exact file without going back to the OS
+    // file picker. Done only after the parse above succeeds, so a malformed
+    // CSV never clobbers a good library entry.
+    final libraryFileName = path.split(RegExp(r'[\\/]')).last;
+    final alreadyInLibrary = await CsvLibrary.exists(libraryFileName);
     if (!mounted) return;
+    if (alreadyInLibrary) {
+      // "上書き保存（確認テロップ出ると良いY/N）" — declining cancels the
+      // whole import (nothing is registered either), so there's no
+      // half-applied state to reason about; the user can rename the source
+      // file and re-import if they want to keep both.
+      final overwrite = await _confirmCsvOverwrite(libraryFileName);
+      if (!mounted || !overwrite) return;
+    } else if (await CsvLibrary.count() >= CsvLibrary.maxEntries) {
+      _showVoyagePlanError(
+          'CSVライブラリの上限（${CsvLibrary.maxEntries}件）に達しています。'
+          '「Edit CSV」から不要なファイルを削除してください。');
+      return;
+    }
+    await CsvLibrary.importFrom(path);
+    if (!mounted) return;
+
     final result = await Navigator.push<VoyagePlanResult>(
       context,
       MaterialPageRoute(
@@ -930,9 +920,348 @@ class _MapScreenState extends State<MapScreen> {
         // suggestion for resolving "which plan feeds the ship" — importing
         // a plan is itself the signal that it should count).
         displayEnabled: true,
+        sourceCsvFileName: libraryFileName,
       ));
     });
     _saveState();
+  }
+
+  // Y/N confirmation before overwriting an existing same-named CSV library
+  // entry (2026-07-27 request). Returns true only on an explicit "Yes".
+  Future<bool> _confirmCsvOverwrite(String fileName) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Overwrite in CSV library?'),
+        content: Text(
+          '"${_fileNameWithoutExtension(fileName)}" は既にCSVライブラリに存在します。'
+          '上書きしますか？',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('No'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('Yes'),
+          ),
+        ],
+      ),
+    );
+    return confirmed == true;
+  }
+
+  // "Select CSV" (2026-07-27 request): register a new Passage Plan from a
+  // CSV already sitting in the library, instead of going back through the
+  // OS file picker for a file that was imported before. Mirrors
+  // _importVoyagePlanCsv's parse → VoyagePlanScreen → register flow, minus
+  // the library-accumulation step (the file's already there).
+  Future<void> _selectCsvFromLibrary(String fileName) async {
+    if (_voyagePlans.length >= _maxVoyagePlans) {
+      _showVoyagePlanError('登録できるPassage Planの上限（$_maxVoyagePlans件）に達しています。');
+      return;
+    }
+    String csvText;
+    try {
+      csvText = await CsvLibrary.readText(fileName);
+    } catch (e) {
+      if (mounted) _showVoyagePlanError('CSVファイルを読み込めませんでした: $e');
+      return;
+    }
+    List<ShipWaypoint> waypoints;
+    try {
+      waypoints = parseVoyagePlanCsv(csvText);
+    } on VoyagePlanParseException catch (e) {
+      if (mounted) _showVoyagePlanError(e.message);
+      return;
+    }
+    if (!mounted) return;
+    final result = await Navigator.push<VoyagePlanResult>(
+      context,
+      MaterialPageRoute(
+        builder: (_) => VoyagePlanScreen(
+          initialWaypoints: waypoints,
+          initialDepartureTime: _startTime,
+        ),
+      ),
+    );
+    if (result == null || !mounted) return;
+    setState(() {
+      _voyagePlans.add(VoyagePlanEntry(
+        name: _fileNameWithoutExtension(fileName),
+        waypoints: result.waypoints,
+        departureTime: result.departureTime,
+        displayEnabled: true,
+        sourceCsvFileName: fileName,
+      ));
+    });
+    _saveState();
+  }
+
+  // "Select CSV" dialog (2026-07-27 request): a plain list of the CSV
+  // library's contents. No per-row actions here (Rename/Delete live in
+  // "Edit CSV" instead, _showCsvLibraryDialog below), so this doesn't need
+  // its own StatefulBuilder — the list itself never changes while open.
+  //
+  // Bug fix (2026-07-27, reported same day: "Saveを押してもすぐに反映されず、
+  // 一度Passage Planを閉じてから開くと表示される"): tapping a row used to
+  // pop this dialog and call `_selectCsvFromLibrary(name)` *without*
+  // awaiting it (the onTap callback wasn't `async`), so this method's
+  // `await showDialog(...)` resolved as soon as the list dialog closed —
+  // well before _selectCsvFromLibrary's own VoyagePlanScreen push/Save/
+  // setState finished. That made `_showPassagePlanDialog`'s
+  // `runAndRefresh(_showSelectCsvDialog)` call `setDialogState` too early,
+  // so the newly-registered plan didn't show up until something else
+  // (closing/reopening Passage Plan, or any other action there) triggered
+  // another rebuild. Fixed by having the list dialog return the tapped
+  // filename via `Navigator.pop(dialogContext, name)` and awaiting
+  // _selectCsvFromLibrary *after* that dialog has actually closed, so this
+  // whole method's Future doesn't complete until registration is done.
+  Future<void> _showSelectCsvDialog() async {
+    final names = await CsvLibrary.listFileNames();
+    if (!mounted) return;
+    final selected = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Select CSV'),
+        content: SizedBox(
+          width: 400,
+          height: 380,
+          child: names.isEmpty
+              ? Center(
+                  child: Text(
+                    'CSV library is empty. Import a CSV first.',
+                    style: TextStyle(color: Colors.grey.shade600),
+                  ),
+                )
+              : ListView.separated(
+                  itemCount: names.length,
+                  separatorBuilder: (_, __) => const Divider(height: 1),
+                  itemBuilder: (context, index) {
+                    final name = names[index];
+                    return ListTile(
+                      dense: true,
+                      title: Text(_fileNameWithoutExtension(name), overflow: TextOverflow.ellipsis),
+                      onTap: () => Navigator.pop(dialogContext, name),
+                    );
+                  },
+                ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('Cancel'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || !mounted) return;
+    await _selectCsvFromLibrary(selected);
+  }
+
+  // Renames a CSV library entry (2026-07-27 request, new functionality —
+  // Passage Plan entries themselves still have no rename UI, see TASKS.md).
+  // Validates: non-empty, no path separators (would otherwise escape the
+  // library folder via File.rename), and no collision with another
+  // existing library entry — shown inline as an error rather than a
+  // separate dialog, same pattern as _showLabelSettingsDialog's
+  // parseErrors.
+  Future<void> _renameCsvLibraryEntry(String oldFileName) async {
+    final controller = TextEditingController(text: _fileNameWithoutExtension(oldFileName));
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        String? error;
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              title: const Text('Rename CSV'),
+              content: TextField(
+                controller: controller,
+                autofocus: true,
+                decoration: InputDecoration(
+                  border: const OutlineInputBorder(),
+                  isDense: true,
+                  errorText: error,
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () async {
+                    final trimmed = controller.text.trim();
+                    if (trimmed.isEmpty || trimmed.contains('/') || trimmed.contains('\\')) {
+                      setDialogState(() => error = '有効なファイル名を入力してください（/ \\ は使用不可）');
+                      return;
+                    }
+                    final newFileName = '$trimmed.csv';
+                    if (newFileName.toLowerCase() != oldFileName.toLowerCase() &&
+                        await CsvLibrary.exists(newFileName)) {
+                      setDialogState(() => error = '同名のファイルが既にライブラリに存在します');
+                      return;
+                    }
+                    await CsvLibrary.rename(oldFileName, newFileName);
+                    // State-level `mounted` (not a BuildContext extension),
+                    // same convention as every other async gap in this file
+                    // (see _editVoyagePlanEntry etc.) — avoids relying on
+                    // the newer BuildContext.mounted extension.
+                    if (mounted) Navigator.pop(dialogContext);
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    controller.dispose();
+  }
+
+  // Permanently removes a CSV from the library (2026-07-27 request: "不要に
+  // なったファイルをライブラリからも完全削除する").
+  //
+  // Cascade-delete behavior (2026-07-27, revised same day after the user
+  // tried the first version and found it confusing — "Editで削除しても
+  // Passage Planには残っている"): deleting a library file that a currently
+  // -registered Passage Plan was sourced from (see
+  // VoyagePlanEntry.sourceCsvFileName) now also removes that plan —
+  // ① if there's at least one such plan, confirm first ("このプランは選択
+  // されていますが削除して良いですか？", in English per the request) since
+  // this is more destructive than deleting an unused library file; ② if
+  // there's none, delete immediately with no prompt, same as before. Plans
+  // registered before sourceCsvFileName existed (null) are never matched,
+  // so deleting their source file's *current* library entry never touches
+  // them — same for a plan whose source file was later renamed in the
+  // library (see that field's doc comment).
+  Future<void> _deleteCsvLibraryEntry(String fileName) async {
+    final linkedPlans = [
+      for (var i = 0; i < _voyagePlans.length; i++)
+        if (_voyagePlans[i].sourceCsvFileName == fileName) i,
+    ];
+
+    if (linkedPlans.isNotEmpty) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (dialogContext) => AlertDialog(
+          title: const Text('Delete CSV?'),
+          content: const Text(
+            'This CSV is currently registered as a Passage Plan. '
+            'Delete it anyway?',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('No'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              child: const Text('Yes'),
+            ),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+      await CsvLibrary.delete(fileName);
+      if (!mounted) return;
+      setState(() {
+        for (final i in linkedPlans.reversed) {
+          _voyagePlans.removeAt(i);
+        }
+      });
+      _saveState();
+    } else {
+      await CsvLibrary.delete(fileName);
+    }
+  }
+
+  // "Edit CSV" dialog (2026-07-27 request): the CSV library's contents with
+  // Rename/Delete per entry, plus a "position/limit" readout (e.g. "3/50")
+  // next to the icons for each row — the user's own suggestion in place of
+  // showing the count on the Passage Plan dialog's buttons (unlike Import
+  // CSV's "(n/10)" label, which counts *registered* plans, a different cap).
+  Future<void> _showCsvLibraryDialog() async {
+    var names = await CsvLibrary.listFileNames();
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            Future<void> refresh() async {
+              final updated = await CsvLibrary.listFileNames();
+              setDialogState(() => names = updated);
+            }
+
+            return AlertDialog(
+              title: const Text('Edit CSV'),
+              content: SizedBox(
+                width: 460,
+                height: 420,
+                child: names.isEmpty
+                    ? Center(
+                        child: Text(
+                          'CSV library is empty.',
+                          style: TextStyle(color: Colors.grey.shade600),
+                        ),
+                      )
+                    : ListView.separated(
+                        itemCount: names.length,
+                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        itemBuilder: (context, index) {
+                          final name = names[index];
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Row(
+                              children: [
+                                Expanded(
+                                  child: Text(
+                                    _fileNameWithoutExtension(name),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                                Text(
+                                  '${index + 1}/${CsvLibrary.maxEntries}',
+                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  tooltip: 'Rename',
+                                  icon: const Icon(Icons.drive_file_rename_outline, size: 20),
+                                  onPressed: () async {
+                                    await _renameCsvLibraryEntry(name);
+                                    await refresh();
+                                  },
+                                ),
+                                IconButton(
+                                  tooltip: 'Delete',
+                                  icon: const Icon(Icons.delete_outline, size: 20),
+                                  onPressed: () async {
+                                    await _deleteCsvLibraryEntry(name);
+                                    await refresh();
+                                  },
+                                ),
+                              ],
+                            ),
+                          );
+                        },
+                      ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
   }
 
   Future<void> _editVoyagePlanEntry(int index) async {
@@ -984,15 +1313,17 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // Passage Plan dialog (2026-08-xx request): a single dialog — not a
-  // PopupMenuButton — with an "Import CSV..." button up top (disabled once
-  // _maxVoyagePlans is reached) and, below it, one row per registered plan:
-  // a Display checkbox (multiple can be on at once, each drawn as its own
-  // independent route — see _activeShipTracks),
-  // its name, and Edit/Delete icon buttons. Each action applies immediately
-  // (setState on the screen) rather than batching behind a Save button,
-  // since there's no single combined "form" to validate — Edit/Delete/
-  // Import each already have their own confirmation/validation step.
+  // Passage Plan dialog (2026-08-xx request, extended 2026-07-27 with the
+  // CSV library — see CsvLibrary): a single dialog — not a PopupMenuButton —
+  // with three buttons up top ("Import CSV..."/"Select CSV..."/"Edit
+  // CSV...", the first two disabled once _maxVoyagePlans registered plans
+  // is reached) and, below them, one row per registered plan: a Display
+  // checkbox (multiple can be on at once, each drawn as its own independent
+  // route — see _activeShipTracks), its name, and Edit/Delete icon buttons.
+  // Each action applies immediately (setState on the screen) rather than
+  // batching behind a Save button, since there's no single combined "form"
+  // to validate — Edit/Delete/Import/Select each already have their own
+  // confirmation/validation step.
   Future<void> _showPassagePlanDialog() async {
     await showDialog<void>(
       context: context,
@@ -1013,10 +1344,38 @@ class _MapScreenState extends State<MapScreen> {
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
+                    // Three-tier CSV entry (2026-07-27 request): "Import
+                    // CSV..." (OS file picker, also accumulates into the CSV
+                    // library), "Select CSV..." (register from a file
+                    // already in the library), "Edit CSV..." (Rename/Delete
+                    // library entries — doesn't register anything itself, so
+                    // it doesn't need runAndRefresh/atLimit).
                     OutlinedButton.icon(
                       icon: const Icon(Icons.upload_file),
-                      label: Text('Import CSV... (${_voyagePlans.length}/$_maxVoyagePlans)'),
+                      // No count on the button itself (2026-07-27 request:
+                      // move it next to each row instead, matching Edit
+                      // CSV's per-row "n/50" — see the "n/$_maxVoyagePlans"
+                      // Text below, next to each row's Edit/Delete icons).
+                      label: const Text('Import CSV...'),
                       onPressed: atLimit ? null : () => runAndRefresh(_importVoyagePlanCsv),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('Select CSV...'),
+                      onPressed: atLimit ? null : () => runAndRefresh(_showSelectCsvDialog),
+                    ),
+                    const SizedBox(height: 8),
+                    OutlinedButton.icon(
+                      icon: const Icon(Icons.library_books),
+                      label: const Text('Edit CSV...'),
+                      // Wrapped in runAndRefresh too (2026-07-27): a cascade
+                      // -delete inside Edit CSV can now remove registered
+                      // plan(s) from _voyagePlans (see
+                      // _deleteCsvLibraryEntry), which this Passage Plan
+                      // dialog's own list needs to reflect once Edit CSV
+                      // closes.
+                      onPressed: () => runAndRefresh(_showCsvLibraryDialog),
                     ),
                     const SizedBox(height: 8),
                     const Divider(height: 1),
@@ -1050,6 +1409,16 @@ class _MapScreenState extends State<MapScreen> {
                                           overflow: TextOverflow.ellipsis,
                                         ),
                                       ),
+                                      // Position/limit readout (2026-07-27
+                                      // request: move the "(n/10)" count off
+                                      // the Import CSV button and onto each
+                                      // row instead, same as Edit CSV's
+                                      // per-row "n/50").
+                                      Text(
+                                        '${index + 1}/$_maxVoyagePlans',
+                                        style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                      ),
+                                      const SizedBox(width: 4),
                                       IconButton(
                                         tooltip: 'Edit',
                                         icon: const Icon(Icons.edit, size: 20),
@@ -1176,6 +1545,13 @@ class _MapScreenState extends State<MapScreen> {
     final typhoons = _typhoonMarkers;
     final typhoonPosition = typhoons.isEmpty ? null : typhoons.first.currentPosition;
     final ships = _buildShipMarkers(typhoonPosition);
+    // Whole playback bar (not just the timeline track inside it) is hidden
+    // when there's nothing to scrub through — i.e. no Passage Plan and no
+    // typhoon info registered (2026-07-27 request: since the sample ship/
+    // typhoon fallbacks were removed, _maxOffsetHours legitimately reaches 0
+    // in that case, and there's no useful reason to show play/speed
+    // controls with nothing to play).
+    final hasTimeline = _maxOffsetHours > 0;
 
     return Scaffold(
       appBar: AppBar(
@@ -1365,7 +1741,7 @@ class _MapScreenState extends State<MapScreen> {
               },
             ),
           ),
-          SafeArea(top: false, child: _buildPlaybackBar()),
+          if (hasTimeline) SafeArea(top: false, child: _buildPlaybackBar()),
         ],
       ),
     );

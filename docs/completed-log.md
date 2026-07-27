@@ -11,6 +11,18 @@
 
 **Flutter×Windows環境メモの反映**（2026-07-25）— ユーザー提供の`flutter-windows-env-notes.md`（Flutter SDK/Android SDKパス、AVD名、`flutter analyze`クラッシュ問題、`.bat`/git操作の既知の落とし穴等）を`docs/`に保存し、CLAUDE.mdのセッション開始チェックリストと環境構成、`docs/operation-rules.md`の完了報告前チェック・git運用から参照するよう反映。
 
+**Information/Passage Planのサンプル表示を廃止、両方空なら再生バー非表示**（2026-07-27）— Information未入力時に出ていた台風のサンプル予報（旧`_typhoonTrackFallback`、スロット0のみ）と、Passage Plan未登録時に出ていた船のサンプル航路（旧`_shipTrackSample`）を削除。デフォルト状態では船も台風も地図に何も表示されない。これに伴い、船・台風のどちらの実データも無い場合は`_maxOffsetHours`が0になり、再生バー全体（プレイ/スピードボタン含む）を`hasTimeline`フラグで非表示にするよう`build()`を変更（従来はタイムライン帯だけが空表示になり、ボタン列は残っていた）。Ship's Name欄はUI・保存ともに残したが、ラベルとして使う先（サンプル船）が無くなったため現状未使用（`lib/screens/map_screen.dart`内にコメントで明記）。
+
+**運用ルールにAgentレビューの既定化・非同期コード確認項目を追加**（2026-07-27）— Select CSVの非同期反映バグ（`onTap`内でawaitし忘れ）を実装前に自己レビューだけで見つけられなかったことを受け、`docs/operation-rules.md`を改訂。①項目5：複数メソッド・非同期フローにまたがる機能追加は、問題発生や3往復以上の繰り返しを待たず、実装完了時点で先にAgentレビューを行うことを明記（「順調に進んでいるから今回は自己レビューで十分」という判断自体が今回のバグと同じ「見た目の一致で済ませる」パターンだと指摘）。②項目10（新設）：非同期コードの完了報告前チェックとして、コールバックのasync化・await漏れ・fire-and-forgetの意図明記を1つずつ辿って確認することを追加。
+
+**Passage Planの件数表示をボタンから行ごとに移動**（2026-07-27）— 「Import CSV... (n/10)」ボタンから件数表記を削除し、代わりにPassage Plan一覧の各行（Edit/Deleteアイコンの左）に「n/10」を表示する方式に変更（Edit CSVの「n/50」と統一）。Windows実機確認済み（2026-07-27、ユーザー確認OK）。
+
+**CSVライブラリ機能の実機確認後の修正2件**（2026-07-27）— ①Select CSVで登録してもPassage Plan一覧にすぐ反映されないバグを修正（`_showSelectCsvDialog`のonTapがawaitされていなかった早すぎるリフレッシュが原因、`showDialog<String>`で選択結果を返す方式に変更）。②Edit CSVでの削除がPassage Planに反映されない点は、ユーザー確認の上で仕様変更：登録済みプランがある場合は英語で確認ダイアログ（Yes/No）を出し、Yesなら道連れ削除、無い場合は確認なしで即削除。`VoyagePlanEntry.sourceCsvFileName`を追加して紐付けを実装。詳細は`docs/devlog-csv-library.md`参照。Windows実機確認済み（2026-07-27、ユーザー確認：「実機で反映、うまくいきました」）。
+
+**CSVライブラリ機能（Import/Select/Edit CSV）を追加**（2026-07-27）— Passage PlanのCSV取り込みを「毎回外部から選び直す」方式から、取り込んだCSVをアプリ内に蓄積（上限50件）して後から再選択できる方式に変更。Passage Planダイアログを「Import CSV／Select CSV／Edit CSV」の3段構成にし、Edit CSVでRename（新規機能）・Delete（完全削除）が可能。新規依存として`path_provider`を追加（既存依存関係経由でWindows実装は解決済みのためビルドリスク低）。設計判断・要件確定の経緯は`docs/devlog-csv-library.md`参照。**確認済み（Windows実機、ユーザーにAskUserQuestionで項目を切り分けて確認）**：①同名Import時の上書きY/N確認ダイアログ、②Select CSVで再登録できること、③Edit CSVのRename/Delete、④ライブラリの削除・改名が既存登録済みPassage Planに影響しないこと——以上4点はOK。上限50件到達時のエラー表示のみ未確認（TASKS.md参照）。Passage Plan「登録済みプラン」自体の名前（表示名）はRename対象外（ライブラリのファイル名のみ変更可）という仕様差についてもユーザー確認済み・現状維持でOK。
+
+**InformationダイアログにTyphoon 1/2/3のClearボタンを追加**（2026-07-27）— 各TyphoonブロックのDisplayチェックボックス左側に「Clear」ボタンを配置し、押下でその枠のテキスト欄を空にする（パースエラー表示もクリア）。更新情報を貼り替える際に手動で全選択・削除する手間をなくす目的。`lib/screens/map_screen.dart`の`_showLabelSettingsDialog`内、既存の`displayCheckbox`と同じ`i`のクロージャパターンを踏襲。
+
 **地図表示・距離計算・データ取得方式の決定**（2026-07-25）— 以前のチャットでの検討内容（中分緯度法での距離計算、簡易プロット版の地図表示、表示範囲N20-50/E115-150固定、JMA防災情報XML＋JTWCテキストのWi-Fi時取得＋オフラインキャッシュのハイブリッド方式）をCLAUDE.mdの現状要約に反映し、詳細な経緯・判断根拠は`docs/devlog-map-design.md`に退避。TASKS.mdも実際の設計に合わせて更新。
 
 **初回git commit/push完了**（2026-07-25、`main`ブランチ、root-commit `279b179`）— `commit.bat`経由でユーザーが実行。10ファイル・396行をリモート`https://github.com/captedge/tyohoon_npo.git`にpush。LF→CRLF変換の警告は無害（内容には影響なし）。
