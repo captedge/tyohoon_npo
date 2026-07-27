@@ -66,8 +66,16 @@ class AppStateStorage {
         for (final slot in typhoonSlots)
           {
             'pastedText': slot.pastedText,
-            'displayEnabled': slot.displayEnabled,
-            'ringsEnabled': slot.ringsEnabled,
+            // JSON key kept as "displayEnabled" (2026-07-28: field renamed to
+            // jtwcDisplayEnabled on the Dart side when the JMA source was
+            // added, but the stored key is left unchanged for backward
+            // compatibility with already-saved state — this app has no
+            // migration step, and there's no reason to force one here).
+            'displayEnabled': slot.jtwcDisplayEnabled,
+            // JSON key kept as "ringsEnabled" (2026-07-28: field renamed to
+            // jtwcRingsEnabled when rings became per-source — same backward
+            // -compatibility reasoning as "displayEnabled" above).
+            'ringsEnabled': slot.jtwcRingsEnabled,
           },
       ],
     };
@@ -106,8 +114,8 @@ class AppStateStorage {
         for (final slotJson in (json['typhoonSlots'] as List? ?? const []))
           TyphoonSlotSnapshot(
             pastedText: (slotJson as Map<String, dynamic>)['pastedText'] as String? ?? '',
-            displayEnabled: slotJson['displayEnabled'] as bool? ?? true,
-            ringsEnabled: slotJson['ringsEnabled'] as bool? ?? true,
+            jtwcDisplayEnabled: slotJson['displayEnabled'] as bool? ?? true,
+            jtwcRingsEnabled: slotJson['ringsEnabled'] as bool? ?? true,
           ),
       ];
       return AppStateSnapshot(
@@ -140,13 +148,18 @@ class AppStateStorage {
 class TyphoonSlotSnapshot {
   const TyphoonSlotSnapshot({
     required this.pastedText,
-    required this.displayEnabled,
-    required this.ringsEnabled,
+    required this.jtwcDisplayEnabled,
+    required this.jtwcRingsEnabled,
   });
 
   final String pastedText;
-  final bool displayEnabled;
-  final bool ringsEnabled;
+
+  /// JTWC-source Display/Rings toggles only — the JMA source (2026-07-28
+  /// addition) is deliberately not persisted (a fetch is session-only), so
+  /// there's nothing to save/restore for it. See map_screen.dart's
+  /// `_TyphoonSlot`.
+  final bool jtwcDisplayEnabled;
+  final bool jtwcRingsEnabled;
 }
 
 /// Result of [AppStateStorage.load]: everything map_screen.dart needs to

@@ -51,6 +51,15 @@ class TyphoonMarker {
   /// just draws whatever's set here.
   final bool showRings;
 
+  /// Per-source color (2026-07-28 request: "気象庁と米軍の予報を両方表示...
+  /// 色分けをする...米軍であれば赤" — JTWC and JMA can now both be displayed
+  /// at once per typhoon slot, so each needs a distinct color to stay
+  /// readable). Assigned by the caller (map_screen.dart's `_jtwcColor`/
+  /// `_jmaColor`) and used for this typhoon's track line, marker dots, icon
+  /// tint, designation label, and pressure label — plus, on the ship side,
+  /// the matching distance-line/readout color (see [ShipTyphoonDistance]).
+  final Color color;
+
   const TyphoonMarker({
     required this.track,
     required this.pastTrack,
@@ -60,7 +69,22 @@ class TyphoonMarker {
     this.pressureLabel,
     this.showRings = false,
     this.trackTimes = const [],
+    this.color = Colors.deepOrange,
   });
+}
+
+/// One ship's distance to one currently-displayed typhoon marker, colored to
+/// match that typhoon's own [TyphoonMarker.color] so the reading is
+/// traceable to its source at a glance (2026-07-28 request: "船との距離は
+/// 上記表示のOn/Offで表示し、同じ色とする"). A [ShipMarker] carries one of
+/// these per currently-displayed typhoon (see [ShipMarker.typhoonDistances]) —
+/// zero when none are displayed, more than one when e.g. both JTWC and JMA
+/// are shown for the same slot at once.
+class ShipTyphoonDistance {
+  final double distanceNm;
+  final Color color;
+
+  const ShipTyphoonDistance({required this.distanceNm, required this.color});
 }
 
 /// One ship/route to draw — either the single fallback sample track, or one
@@ -76,10 +100,14 @@ class TyphoonMarker {
 /// [position] as their boundary. [label] is the plan's name (or the
 /// user-entered "Ship's Name" for the sample/fallback track) — since
 /// multiple routes can be on screen at once, each needs its own label rather
-/// than one shared "Ship" caption. [distanceToTyphoonNm] is this ship's own
-/// distance to the primary typhoon at the current time (null when there's no
-/// typhoon to compare against) — computed independently per ship so each
-/// route's distance line/readout is its own, not shared.
+/// than one shared "Ship" caption. [typhoonDistances] is this ship's own
+/// distance to *every* currently-displayed typhoon marker at the current
+/// time (2026-07-28: previously a single `distanceToTyphoonNm` measuring only
+/// to the "primary" typhoon — extended to one entry per displayed typhoon,
+/// each colored to match its source, once JTWC/JMA could both be shown at
+/// once per slot) — empty when there's no typhoon to compare against.
+/// Computed independently per ship so each route's distance readouts are its
+/// own, not shared.
 class ShipMarker {
   final LatLng position;
   final List<LatLng> route;
@@ -87,7 +115,7 @@ class ShipMarker {
   final List<LatLng> futureRoute;
   final LatLng? nextWaypoint;
   final String label;
-  final double? distanceToTyphoonNm;
+  final List<ShipTyphoonDistance> typhoonDistances;
 
   /// Per-route color (2026-08-xx request: comparing multiple routes from the
   /// same departure port/time made them hard to tell apart when all drawn
@@ -104,7 +132,7 @@ class ShipMarker {
     required this.futureRoute,
     this.nextWaypoint,
     required this.label,
-    this.distanceToTyphoonNm,
+    this.typhoonDistances = const [],
     this.color = Colors.blue,
   });
 }
@@ -134,10 +162,11 @@ class MapPainter extends CustomPainter {
 
   double get _invZoom => zoom > 0 ? 1 / zoom : 1.0;
 
-  /// Up to 3 typhoons (2026-07-28 request), already filtered to "Display
-  /// checkbox on" and "has at least a current position" by the caller —
-  /// this painter just draws whatever's in the list, in order. The distance
-  /// line/readout for each ship (when present) measures to `typhoons.first`.
+  /// Up to 3 slots × 2 sources (JTWC/JMA, 2026-07-28), already filtered to
+  /// "Display checkbox on" and "has at least a current position" by the
+  /// caller — this painter just draws whatever's in the list, in order. Each
+  /// ship draws one distance line/readout to *every* entry here (see
+  /// [ShipMarker.typhoonDistances]), not just a single "primary" one.
   final List<TyphoonMarker> typhoons;
 
   /// Ship/typhoon marker icon images (2026-08-xx request: replace the
@@ -172,9 +201,13 @@ class MapPainter extends CustomPainter {
     for (final typhoon in typhoons) {
       _drawTyphoonTrack(canvas, typhoon);
     }
-    if (typhoons.isNotEmpty) {
-      for (final ship in ships) {
-        _drawDistanceLine(canvas, ship.position, typhoons.first.currentPosition);
+    // One dashed line per (ship, displayed typhoon) pair, each colored to
+    // match that typhoon's own color (2026-07-28: previously only drawn to
+    // `typhoons.first` — extended to every displayed typhoon once JTWC/JMA
+    // could both be shown at once per slot, see ShipTyphoonDistance).
+    for (final ship in ships) {
+      for (final typhoon in typhoons) {
+        _drawDistanceLine(canvas, ship.position, typhoon.currentPosition, typhoon.color);
       }
     }
     for (final ship in ships) {
@@ -342,12 +375,16 @@ class MapPainter extends CustomPainter {
   // top, by _drawTyphoonMarker.
   void _drawTyphoonTrack(Canvas canvas, TyphoonMarker typhoon) {
     if (typhoon.track.length < 2) return;
-    _drawPolyline(canvas, typhoon.pastTrack, Colors.deepOrange, dashed: false);
-    _drawPolyline(canvas, typhoon.futureTrack, Colors.deepOrange, dashed: true);
+    _drawPolyline(canvas, typhoon.pastTrack, typhoon.color, dashed: false);
+    _drawPolyline(canvas, typhoon.futureTrack, typhoon.color, dashed: true);
 
-    final markerPaint = Paint()..color = Colors.orange.shade200;
+    // Marker dots derived from the typhoon's own color (2026-07-28: used to
+    // be a fixed orange/deepOrange pair) — a translucent fill in the source
+    // color plus a darker-shaded border, same relationship the original
+    // orange/deepOrange.shade900 pairing had.
+    final markerPaint = Paint()..color = typhoon.color.withOpacity(0.35);
     final markerBorder = Paint()
-      ..color = Colors.deepOrange.shade900
+      ..color = Color.lerp(typhoon.color, Colors.black, 0.4)!
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.5;
     const dotRadius = 5.0;
@@ -389,11 +426,15 @@ class MapPainter extends CustomPainter {
     canvas.restore();
   }
 
-  void _drawDistanceLine(Canvas canvas, LatLng shipPosition, LatLng typhoonPosition) {
+  // [color] matches the typhoon this line measures to (2026-07-28: used to
+  // be a fixed grey regardless of which typhoon) so a line is traceable to
+  // its source even with several on screen (JTWC/JMA per slot, multiple
+  // slots) at once.
+  void _drawDistanceLine(Canvas canvas, LatLng shipPosition, LatLng typhoonPosition, Color color) {
     final shipOffset = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
     final typhoonOffset = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
     final dashPaint = Paint()
-      ..color = Colors.grey.shade700
+      ..color = color
       ..strokeWidth = 1.5;
     final path = Path()
       ..moveTo(shipOffset.dx, shipOffset.dy)
@@ -402,7 +443,7 @@ class MapPainter extends CustomPainter {
 
     // The distance readout itself is drawn together with the ship's name
     // label in _drawShip (both stack behind the ship, name innermost /
-    // distance outermost), so nothing else to draw here.
+    // distance readouts outermost), so nothing else to draw here.
   }
 
   // Distance readout, pinned behind the ship — i.e. the opposite direction
@@ -423,10 +464,17 @@ class MapPainter extends CustomPainter {
   // canvas space (so this stacks correctly with the name label drawn in the
   // same space) and passes in [behind] (unit direction) and [startDistance]
   // (how far along that direction this box's near edge should start, i.e.
-  // past whatever's already stacked closer to the ship). [distanceNm] is now
-  // per-ship (each route has its own distance to the primary typhoon) rather
-  // than a single painter-wide value.
-  void _drawDistanceLabel(Canvas canvas, Offset behind, double startDistance, double distanceNm) {
+  // past whatever's already stacked closer to the ship). [distanceNm] is
+  // per-ship, per-typhoon (2026-07-28: each ship can now show more than one
+  // distance box at once, one per currently-displayed typhoon — see
+  // ShipMarker.typhoonDistances). [color] is that typhoon's own color; used
+  // as the box's *fill* with a black border (2026-07-28 revision: an earlier
+  // version colored only the border on a fixed dark-blueGrey fill, but the
+  // user reported the border-only coloring was hard to tell apart at a
+  // glance — filling the whole box in the source color reads much more
+  // clearly, and a plain black outline keeps the box legible against both
+  // the sea/land background and the similarly-colored track line).
+  void _drawDistanceLabel(Canvas canvas, Offset behind, double startDistance, double distanceNm, Color color) {
     const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
     final painter = TextPainter(
       text: TextSpan(text: '${distanceNm.round()} nm', style: style),
@@ -443,15 +491,32 @@ class MapPainter extends CustomPainter {
     final rect = Rect.fromCenter(center: localCenter, width: boxWidth, height: boxHeight);
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(4));
 
-    canvas.drawRRect(rrect, Paint()..color = Colors.blueGrey.shade800.withOpacity(0.9));
+    canvas.drawRRect(rrect, Paint()..color = color.withOpacity(0.92));
     canvas.drawRRect(
       rrect,
       Paint()
-        ..color = Colors.white.withOpacity(0.6)
+        ..color = Colors.black
         ..style = PaintingStyle.stroke
-        ..strokeWidth = 1,
+        ..strokeWidth = 1.5,
     );
     painter.paint(canvas, Offset(rect.left + paddingH, rect.top + paddingV));
+  }
+
+  /// Total on-screen footprint (stacking distance + its own diagonal) one
+  /// [_drawDistanceLabel] box occupies along the "behind" axis — used by
+  /// [_drawShip] to lay out multiple distance boxes one after another
+  /// without needing to duplicate this sizing math.
+  double _distanceLabelExtent(double startDistance, double distanceNm) {
+    final painter = TextPainter(
+      text: TextSpan(text: '${distanceNm.round()} nm', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    const paddingH = 6.0;
+    const paddingV = 3.0;
+    final boxWidth = painter.width + paddingH * 2;
+    final boxHeight = painter.height + paddingV * 2;
+    final diagonal = math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight);
+    return startDistance + diagonal;
   }
 
   // Unit vector pointing opposite a ship's heading toward its next waypoint —
@@ -591,14 +656,17 @@ class MapPainter extends CustomPainter {
     }
     canvas.restore();
 
-    // Ship name + distance-to-typhoon, stacked behind the ship (2026-08-xx
-    // request: labels used to sit fixed to the right of the icon; now both
-    // always follow the "behind" direction — opposite of the heading toward
-    // the next waypoint, same direction the distance box already used — so
-    // they read naturally regardless of which way the ship is heading.
-    // Stacked with the name innermost (closer to the ship) and the distance
-    // box outermost so the two never overlap. Font size/weight/color for the
-    // name are unchanged from before.
+    // Ship name + one distance-to-typhoon box per currently-displayed
+    // typhoon, all stacked behind the ship (2026-08-xx request: labels used
+    // to sit fixed to the right of the icon; now they follow the "behind"
+    // direction — opposite of the heading toward the next waypoint — so they
+    // read naturally regardless of which way the ship is heading). Stacked
+    // with the name innermost (closest to the ship) and distance boxes
+    // outermost, each one further out than the last (2026-07-28: extended
+    // from a single distance box to one per [ShipMarker.typhoonDistances]
+    // entry, since a ship can now show its distance to several
+    // simultaneously-displayed typhoons — e.g. JTWC and JMA for the same
+    // slot). Font size/weight/color for the name are unchanged from before.
     final behind = _shipBehindDirection(ship, o);
     canvas.save();
     canvas.translate(o.dx, o.dy);
@@ -611,15 +679,16 @@ class MapPainter extends CustomPainter {
     )..layout();
 
     const gap = 14.0; // clearance from the ship icon (icon anchored near the stern, ~5px half-width)
-    const stackGap = 4.0; // clearance between the name and the distance box
+    const stackGap = 4.0; // clearance between stacked labels/boxes
     final nameDiagonal = math.sqrt(namePainter.width * namePainter.width + namePainter.height * namePainter.height);
     final nameDistance = gap + nameDiagonal / 2;
     final nameCenter = behind * nameDistance;
     namePainter.paint(canvas, nameCenter - Offset(namePainter.width / 2, namePainter.height / 2));
 
-    final distanceNm = ship.distanceToTyphoonNm;
-    if (distanceNm != null) {
-      _drawDistanceLabel(canvas, behind, nameDistance + nameDiagonal / 2 + stackGap, distanceNm);
+    var nextStart = nameDistance + nameDiagonal / 2 + stackGap;
+    for (final entry in ship.typhoonDistances) {
+      _drawDistanceLabel(canvas, behind, nextStart, entry.distanceNm, entry.color);
+      nextStart = _distanceLabelExtent(nextStart, entry.distanceNm) + stackGap;
     }
     canvas.restore();
   }
@@ -657,20 +726,26 @@ class MapPainter extends CustomPainter {
         icon,
         Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
         Rect.fromCenter(center: Offset.zero, width: size, height: size),
-        Paint()..filterQuality = FilterQuality.medium,
+        Paint()
+          ..filterQuality = FilterQuality.medium
+          // Tinted to this typhoon's source color (2026-07-28: JTWC/JMA can
+          // both be shown at once, so the icon itself — not just the track —
+          // needs to carry the color), same srcIn-tint approach as the ship
+          // icon.
+          ..colorFilter = ColorFilter.mode(typhoon.color, BlendMode.srcIn),
       );
     } else {
       // Fallback while the icon asset is still decoding.
-      final paint = Paint()..color = Colors.red.shade400;
+      final paint = Paint()..color = typhoon.color.withOpacity(0.85);
       final border = Paint()
-        ..color = Colors.red.shade900
+        ..color = Color.lerp(typhoon.color, Colors.black, 0.35)!
         ..style = PaintingStyle.stroke
         ..strokeWidth = 2;
       canvas.drawCircle(Offset.zero, 10, paint);
       canvas.drawCircle(Offset.zero, 10, border);
     }
 
-    const labelStyle = TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.w600);
+    final labelStyle = TextStyle(color: typhoon.color, fontSize: 11, fontWeight: FontWeight.w600);
     final labelPainter = TextPainter(
       text: TextSpan(text: typhoon.label, style: labelStyle),
       textDirection: TextDirection.ltr,
@@ -689,7 +764,7 @@ class MapPainter extends CustomPainter {
       canvas.translate(startOffset.dx, startOffset.dy);
       canvas.scale(_invZoom);
       _drawText(canvas, pressureLabel, const Offset(12, 8),
-          TextStyle(color: Colors.deepOrange.shade900, fontSize: 10, fontWeight: FontWeight.w600));
+          TextStyle(color: Color.lerp(typhoon.color, Colors.black, 0.35), fontSize: 10, fontWeight: FontWeight.w600));
       canvas.restore();
     }
   }
@@ -798,7 +873,8 @@ class MapPainter extends CustomPainter {
     for (var i = 0; i < ships.length && i < old.length; i++) {
       if (old[i].label != ships[i].label ||
           old[i].color != ships[i].color ||
-          old[i].distanceToTyphoonNm != ships[i].distanceToTyphoonNm ||
+          old[i].typhoonDistances.length != ships[i].typhoonDistances.length ||
+          _typhoonDistancesChanged(old[i].typhoonDistances, ships[i].typhoonDistances) ||
           old[i].route.length != ships[i].route.length ||
           old[i].pastRoute.length != ships[i].pastRoute.length ||
           old[i].futureRoute.length != ships[i].futureRoute.length ||
@@ -812,11 +888,19 @@ class MapPainter extends CustomPainter {
     return false;
   }
 
+  bool _typhoonDistancesChanged(List<ShipTyphoonDistance> old, List<ShipTyphoonDistance> current) {
+    for (var i = 0; i < current.length && i < old.length; i++) {
+      if (old[i].distanceNm != current[i].distanceNm || old[i].color != current[i].color) return true;
+    }
+    return false;
+  }
+
   bool _typhoonsChanged(List<TyphoonMarker> old) {
     for (var i = 0; i < typhoons.length && i < old.length; i++) {
       if (old[i].label != typhoons[i].label ||
           old[i].pressureLabel != typhoons[i].pressureLabel ||
           old[i].showRings != typhoons[i].showRings ||
+          old[i].color != typhoons[i].color ||
           old[i].track.length != typhoons[i].track.length ||
           old[i].pastTrack.length != typhoons[i].pastTrack.length ||
           old[i].futureTrack.length != typhoons[i].futureTrack.length ||

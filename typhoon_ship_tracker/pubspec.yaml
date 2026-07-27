@@ -23,6 +23,11 @@ dependencies:
   # 既にshared_preferences_windows/file_picker経由でこのプロジェクトに間接的に
   # 解決済み（pubspec.lock参照）のため、新規のネイティブビルド要件は発生しない見込み。
   path_provider: ^2.1.4
+  # 気象庁「防災情報XML」（VPTW60電文）のパース用（2026-07-28追加）。純Dart実装の
+  # XMLパーサーでネイティブコードを含まないため、file_picker導入時のsymlink要件
+  # のようなWindowsデスクトップビルド特有の追加設定は不要（docs/operation-rules.md
+  # 完了報告前チェック項目7の確認事項）。
+  xml: ^7.0.1
 
 dev_dependencies:
   flutter_test:

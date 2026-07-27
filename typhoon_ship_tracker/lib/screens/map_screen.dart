@@ -14,6 +14,8 @@ import '../utils/app_state_storage.dart';
 import '../utils/coastline.dart';
 import '../utils/csv_library.dart';
 import '../utils/interpolation.dart';
+import '../utils/jma_feed_fetcher.dart';
+import '../utils/jma_xml_parser.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
 import '../utils/marker_icons.dart';
@@ -131,11 +133,15 @@ class _MapScreenState extends State<MapScreen> {
     // that instead of a total blackout.
     var typhoonMaxHours = 0.0;
     for (var i = 0; i < _typhoonSlots.length; i++) {
-      if (!_typhoonSlots[i].displayEnabled) continue;
-      final points = _trackPointsForSlot(i);
-      if (points == null || points.isEmpty) continue;
-      final hours = points.last.time.difference(_startTime).inMinutes / 60.0;
-      if (hours > typhoonMaxHours) typhoonMaxHours = hours;
+      final slot = _typhoonSlots[i];
+      for (final points in [
+        if (slot.jtwcDisplayEnabled) _jtwcTrackPointsForSlot(i),
+        if (slot.jmaDisplayEnabled) _jmaTrackPointsForSlot(i),
+      ]) {
+        if (points == null || points.isEmpty) continue;
+        final hours = points.last.time.difference(_startTime).inMinutes / 60.0;
+        if (hours > typhoonMaxHours) typhoonMaxHours = hours;
+      }
     }
     return typhoonMaxHours;
   }
@@ -209,26 +215,29 @@ class _MapScreenState extends State<MapScreen> {
   // simply has no track until real data is pasted for it. See
   // _typhoonMarkers below.
   //
-  // Default Display on/off (2026-07-27 request): only Ship and Typhoon 1 are
-  // on at app launch — slots 1-2 default off since they have no data to show
-  // until the user pastes a JTWC text for them anyway.
+  // Default Display on/off (2026-07-27 request): only Ship and Typhoon 1's
+  // JTWC source are on at app launch — slots 1-2 default off since they have
+  // no data to show until the user pastes/fetches something for them
+  // anyway. JMA display defaults off for every slot regardless (see
+  // _TyphoonSlot.jmaDisplayEnabled) since there's nothing fetched yet on a
+  // fresh launch either way.
   final List<_TyphoonSlot> _typhoonSlots = List.generate(
     3,
-    (i) => _TyphoonSlot()..displayEnabled = i == 0,
+    (i) => _TyphoonSlot()..jtwcDisplayEnabled = i == 0,
   );
 
-  // Builds the TrackPoint list a slot's track/current-position/timeline
+  // Builds the TrackPoint list a slot's JTWC track/current-position/timeline
   // math should use: the parsed JTWC data (current position + forecast
   // points, offset from _startTime — see JtwcForecastPoint), or null when
   // there's nothing to plot yet (no JTWC text pasted for this slot, or a
   // slot whose pasted text had no REPEAT POSIT line to anchor a position on).
-  List<TrackPoint>? _trackPointsForSlot(int index) {
-    final slot = _typhoonSlots[index];
-    final position = slot.info.position;
+  List<TrackPoint>? _jtwcTrackPointsForSlot(int index) {
+    final info = _typhoonSlots[index].jtwcInfo;
+    final position = info.position;
     if (position == null) return null;
     return [
       TrackPoint(time: _startTime, latitude: position.latitude, longitude: position.longitude),
-      for (final point in slot.info.forecastTrack)
+      for (final point in info.forecastTrack)
         TrackPoint(
           time: _startTime.add(Duration(hours: point.hoursFromNow)),
           latitude: point.position.latitude,
@@ -237,34 +246,90 @@ class _MapScreenState extends State<MapScreen> {
     ];
   }
 
-  // Builds the actual [TyphoonMarker]s to draw: one per Display-enabled
-  // slot that has track data (see _trackPointsForSlot). The slider-time
-  // interpolation and "whole track drawn persistently" behavior mirror the
-  // ship's (positionAt / full-route rendering) — 2026-07-28 request: "台風
-  // の軌跡：船のように残してください".
+  // Builds the TrackPoint list a slot's JMA track/current-position/timeline
+  // math should use (2026-07-28 addition): [JmaTyphoonInfo.toTrackPoints]
+  // already carries absolute JST times for the observed position and every
+  // forecast point, so — unlike the JTWC path above — no `_startTime`-offset
+  // math is needed here at all. Null when nothing's been fetched yet for
+  // this slot.
+  List<TrackPoint>? _jmaTrackPointsForSlot(int index) {
+    final points = _typhoonSlots[index].jmaInfo.toTrackPoints();
+    return points.isEmpty ? null : points;
+  }
+
+  // Track color per source (2026-07-28 request: "気象庁と米軍の予報を両方
+  // 表示...色分けをする...米軍であれば赤" — JTWC/US military is red; JMA gets
+  // a different, equally distinct color so both can be on screen at once
+  // without becoming unreadable). Shared by the track line, marker dots,
+  // icon tint, designation label, pressure label, and the matching ship-side
+  // distance readout for that source — see map_painter.dart.
+  static const Color _jtwcColor = Color(0xFFE53935); // red
+  static const Color _jmaColor = Color(0xFFEF6C00); // orange
+
+  // Builds one [TyphoonMarker] from an already-resolved track — shared by
+  // both the JTWC and JMA paths below, which differ only in how they build
+  // [points]/[designation]/[pressureLabel]/[color].
+  TyphoonMarker _typhoonMarkerFromTrack(
+    List<TrackPoint> points, {
+    required String? designation,
+    required String? pressureLabel,
+    required bool showRings,
+    required Color color,
+  }) {
+    final split = splitTrackAtTime(points, _currentTime);
+    return TyphoonMarker(
+      track: points.map((p) => LatLng(p.latitude, p.longitude)).toList(),
+      pastTrack: split.past,
+      futureTrack: split.future,
+      currentPosition: positionAt(points, _currentTime),
+      label: designation ?? 'Typhoon',
+      pressureLabel: pressureLabel,
+      showRings: showRings,
+      // Parallel to `track`, same order (2026-07-27 request: show each
+      // forecast point's valid time, e.g. "27/15" for JTWC's "270600Z",
+      // next to its circle). `points` is already ordered/aligned with the
+      // `track` list above, so a plain `.time` map keeps them in lockstep.
+      trackTimes: points.map((p) => p.time).toList(),
+      color: color,
+    );
+  }
+
+  // Builds the actual [TyphoonMarker]s to draw: up to two per slot (2026-
+  // 07-28 request — JTWC and JMA shown simultaneously, each independently
+  // Display-toggleable), each colored by source (see _jtwcColor/_jmaColor).
+  // The slider-time interpolation and "whole track drawn persistently"
+  // behavior mirror the ship's (positionAt / full-route rendering) —
+  // 2026-07-28 request: "台風の軌跡：船のように残してください".
   List<TyphoonMarker> get _typhoonMarkers {
     final markers = <TyphoonMarker>[];
     for (var i = 0; i < _typhoonSlots.length; i++) {
       final slot = _typhoonSlots[i];
-      if (!slot.displayEnabled) continue;
-      final points = _trackPointsForSlot(i);
-      if (points == null || points.isEmpty) continue;
-      final split = splitTrackAtTime(points, _currentTime);
-      markers.add(TyphoonMarker(
-        track: points.map((p) => LatLng(p.latitude, p.longitude)).toList(),
-        pastTrack: split.past,
-        futureTrack: split.future,
-        currentPosition: positionAt(points, _currentTime),
-        label: slot.info.designation ?? 'Typhoon',
-        pressureLabel: slot.info.centralPressureHpa == null ? null : '${slot.info.centralPressureHpa}hPa',
-        showRings: slot.ringsEnabled,
-        // Parallel to `track`, same order (2026-07-27 request: show each
-        // forecast point's valid time, e.g. "27/15" for JTWC's "270600Z",
-        // next to its circle). `points` is already ordered/aligned with the
-        // `track` list above (both derived from the same `_trackPointsForSlot`
-        // call), so a plain `.time` map keeps them in lockstep.
-        trackTimes: points.map((p) => p.time).toList(),
-      ));
+      if (slot.jtwcDisplayEnabled) {
+        final points = _jtwcTrackPointsForSlot(i);
+        if (points != null && points.isNotEmpty) {
+          markers.add(_typhoonMarkerFromTrack(
+            points,
+            designation: _jtwcMarkerLabel(slot),
+            pressureLabel:
+                slot.jtwcInfo.centralPressureHpa == null ? null : '${slot.jtwcInfo.centralPressureHpa}hPa',
+            showRings: slot.jtwcRingsEnabled,
+            color: _jtwcColor,
+          ));
+        }
+      }
+      if (slot.jmaDisplayEnabled) {
+        final points = _jmaTrackPointsForSlot(i);
+        if (points != null && points.isNotEmpty) {
+          markers.add(_typhoonMarkerFromTrack(
+            points,
+            designation: _jmaMarkerLabel(slot),
+            pressureLabel:
+                slot.jmaInfo.centralPressureHpa == null ? null : '${slot.jmaInfo.centralPressureHpa}hPa',
+            showRings: slot.jmaRingsEnabled,
+            color: _jmaColor,
+          ));
+        }
+      }
     }
     return markers;
   }
@@ -327,17 +392,22 @@ class _MapScreenState extends State<MapScreen> {
         final saved = snapshot.typhoonSlots[i];
         final slot = _typhoonSlots[i];
         slot.pastedText = saved.pastedText;
-        slot.displayEnabled = saved.displayEnabled;
-        slot.ringsEnabled = saved.ringsEnabled;
-        slot.info = saved.pastedText.trim().isEmpty
+        slot.jtwcDisplayEnabled = saved.jtwcDisplayEnabled;
+        slot.jtwcRingsEnabled = saved.jtwcRingsEnabled;
+        slot.jtwcInfo = saved.pastedText.trim().isEmpty
             ? JtwcTyphoonInfo.empty
             : parseJtwcWarningText(saved.pastedText);
+        // JMA fetches (and their rings toggle) are session-only and never
+        // persisted (see _TyphoonSlot.jmaInfo doc comment) —
+        // slot.jmaInfo/jmaDisplayEnabled/jmaRingsEnabled are left at their
+        // fresh-construction defaults here.
       }
       // Mirrors _showLabelSettingsDialog's Save handler: playback start time
       // follows slot 0's warning, resolved against the *real* current date
       // (not a stale value from whenever this was last saved) so a
-      // multi-day-old save doesn't drift the resolved year/month.
-      final restoredStart = _typhoonSlots[0].info.issuedAtJst(DateTime.now());
+      // multi-day-old save doesn't drift the resolved year/month. Only the
+      // JTWC source is considered here since JMA isn't restored (see above).
+      final restoredStart = _typhoonSlots[0].jtwcInfo.issuedAtJst(DateTime.now());
       if (restoredStart != null) {
         _startTime = restoredStart;
         _offsetHours = 0;
@@ -358,8 +428,8 @@ class _MapScreenState extends State<MapScreen> {
         for (final slot in _typhoonSlots)
           TyphoonSlotSnapshot(
             pastedText: slot.pastedText,
-            displayEnabled: slot.displayEnabled,
-            ringsEnabled: slot.ringsEnabled,
+            jtwcDisplayEnabled: slot.jtwcDisplayEnabled,
+            jtwcRingsEnabled: slot.jtwcRingsEnabled,
           ),
       ],
     );
@@ -672,29 +742,96 @@ class _MapScreenState extends State<MapScreen> {
     final typhoonControllers = [
       for (final slot in _typhoonSlots) TextEditingController(text: slot.pastedText),
     ];
-    final typhoonDisplayLocal = [for (final slot in _typhoonSlots) slot.displayEnabled];
+    final jtwcDisplayLocal = [for (final slot in _typhoonSlots) slot.jtwcDisplayEnabled];
     final parseErrors = List<String?>.filled(_typhoonSlots.length, null);
+
+    // JMA auto-fetch state (2026-07-28 addition, per-slot): "Fetch from JMA"
+    // downloads+parses the latest VPTW60 bulletin (see jma_feed_fetcher.dart)
+    // into jmaFetched[i] — kept as the raw [JmaTyphoonInfo] (2026-07-28
+    // redesign: "気象庁と米軍の予報を両方表示" — JTWC and JMA are now two
+    // independent, simultaneously-displayable sources per slot rather than
+    // one overriding the other, so there's no more reason to convert into
+    // JtwcTyphoonInfo's shape at fetch time). Seeded from whatever's already
+    // in `_typhoonSlots[i].jmaInfo` (a previous fetch from earlier in this
+    // session, if any) so reopening this dialog shows the current state
+    // rather than looking freshly empty. Session-only, same as before — see
+    // _TyphoonSlot.jmaInfo's doc comment for why this isn't persisted.
+    final jmaFetched = List<JmaTyphoonInfo>.generate(_typhoonSlots.length, (i) => _typhoonSlots[i].jmaInfo);
+    final jmaDisplayLocal = [for (final slot in _typhoonSlots) slot.jmaDisplayEnabled];
+    final jmaFetching = List<bool>.filled(_typhoonSlots.length, false);
+    final jmaFetchError = List<String?>.filled(_typhoonSlots.length, null);
+    // Guards against calling a StatefulBuilder's setState after this dialog
+    // has already been popped (Cancel/Save) while a fetch is still
+    // in-flight — set false in both action handlers below, checked before
+    // every setDialogState call inside fetchJma's async continuations.
+    var dialogOpen = true;
 
     await showDialog<void>(
       context: context,
+      // Explicit false (2026-07-28, Agent review finding): this dialog can
+      // have a "Fetch from JMA" request in flight, and the default (true)
+      // lets a barrier tap dismiss the dialog without going through either
+      // action button below — neither of which would then run, so
+      // `dialogOpen` would stay true and a fetch completing afterward could
+      // call setDialogState on an already-disposed StatefulBuilder (a
+      // "setState() called after dispose()" crash). Forcing Cancel/Save as
+      // the only way out keeps `dialogOpen = false` reliably set on every
+      // dismissal path.
+      barrierDismissible: false,
       builder: (dialogContext) {
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
-            Widget displayCheckbox(bool value, ValueChanged<bool?> onChanged) {
+            Widget displayCheckbox(String labelText, Color labelColor, bool value, ValueChanged<bool?> onChanged) {
               return Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Checkbox(value: value, onChanged: onChanged),
-                  const Text('Display'),
+                  Text(labelText, style: TextStyle(color: labelColor, fontWeight: FontWeight.w600)),
                 ],
               );
+            }
+
+            Future<void> fetchJma(int i) async {
+              setDialogState(() {
+                jmaFetching[i] = true;
+                jmaFetchError[i] = null;
+              });
+              try {
+                final JmaTyphoonInfo jma = await fetchLatestJmaTyphoon();
+                if (!dialogOpen) return;
+                if (jma.isEmpty) {
+                  setDialogState(() {
+                    jmaFetching[i] = false;
+                    jmaFetchError[i] = '現在、気象庁から発表中の台風情報が見つかりませんでした。';
+                  });
+                  return;
+                }
+                setDialogState(() {
+                  jmaFetching[i] = false;
+                  jmaFetched[i] = jma;
+                  // Auto-enable Display on a successful fetch (2026-07-28):
+                  // the whole point of pressing this button is to see the
+                  // result, so requiring a *second* click on a separate
+                  // checkbox before anything shows would be needless
+                  // friction — unlike the JTWC checkbox, which has no
+                  // equivalent "just fetched it" moment to auto-follow.
+                  jmaDisplayLocal[i] = true;
+                  jmaFetchError[i] = null;
+                });
+              } catch (e) {
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  jmaFetching[i] = false;
+                  jmaFetchError[i] = '取得に失敗しました: $e';
+                });
+              }
             }
 
             return AlertDialog(
               title: const Text('Information'),
               content: SizedBox(
-                width: 460,
-                height: 560,
+                width: 480,
+                height: 620,
                 child: SingleChildScrollView(
                   child: Column(
                     mainAxisSize: MainAxisSize.min,
@@ -719,17 +856,71 @@ class _MapScreenState extends State<MapScreen> {
                                   style: const TextStyle(fontWeight: FontWeight.bold)),
                             ),
                             TextButton(
+                              // Clears both sources for this slot (2026-07-28:
+                              // previously only cleared the JTWC paste box —
+                              // extended to also drop any JMA fetch, so
+                              // "Clear" reliably means "start this slot over"
+                              // for either source).
                               onPressed: () => setDialogState(() {
                                 typhoonControllers[i].clear();
                                 parseErrors[i] = null;
+                                jmaFetched[i] = JmaTyphoonInfo.empty;
+                                jmaDisplayLocal[i] = false;
+                                jmaFetchError[i] = null;
                               }),
                               child: const Text('Clear'),
                             ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        // JMA source (2026-07-28: shown above JTWC since
+                        // fetching is the primary/first-choice path — the
+                        // paste box below is the fallback for when auto
+                        // fetch isn't available/desired).
+                        Row(
+                          children: [
                             displayCheckbox(
-                              typhoonDisplayLocal[i],
-                              (v) => setDialogState(() => typhoonDisplayLocal[i] = v ?? true),
+                              'JMA Display',
+                              _jmaColor,
+                              jmaDisplayLocal[i],
+                              (v) => setDialogState(() => jmaDisplayLocal[i] = v ?? false),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed: jmaFetching[i] ? null : () => fetchJma(i),
+                              icon: jmaFetching[i]
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    )
+                                  : const Icon(Icons.cloud_download, size: 16),
+                              label: Text(jmaFetching[i] ? 'Fetching...' : 'Fetch from JMA'),
                             ),
                           ],
+                        ),
+                        if (jmaFetchError[i] != null) ...[
+                          const SizedBox(height: 4),
+                          Text(jmaFetchError[i]!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+                        ],
+                        if (!jmaFetched[i].isEmpty) ...[
+                          const SizedBox(height: 4),
+                          Text(
+                            'JMA: ${jmaFetched[i].designation ?? jmaFetched[i].classification ?? "(unnamed)"}'
+                            '${jmaFetched[i].centralPressureHpa == null ? '' : ' · ${jmaFetched[i].centralPressureHpa}hPa'}'
+                            '${jmaFetched[i].observedAtJst == null ? '' : ' (${_formatDateTime(jmaFetched[i].observedAtJst!)})'}',
+                            style: TextStyle(fontSize: 11, color: _jmaColor),
+                          ),
+                        ],
+                        const SizedBox(height: 10),
+                        // JTWC source (pasted warning text) — unchanged
+                        // parsing/validation behavior, now with its own
+                        // Display checkbox instead of one shared with JMA.
+                        displayCheckbox(
+                          'JTWC Display',
+                          _jtwcColor,
+                          jtwcDisplayLocal[i],
+                          (v) => setDialogState(() => jtwcDisplayLocal[i] = v ?? true),
                         ),
                         const SizedBox(height: 4),
                         Text(
@@ -749,9 +940,9 @@ class _MapScreenState extends State<MapScreen> {
                             isDense: true,
                           ),
                         ),
-                        if (!_typhoonSlots[i].info.isEmpty) ...[
+                        if (!_typhoonSlots[i].jtwcInfo.isEmpty) ...[
                           const SizedBox(height: 6),
-                          Text('Current: ${_typhoonSlots[i].info.summary}',
+                          Text('Current: ${_typhoonSlots[i].jtwcInfo.summary}',
                               style: TextStyle(fontSize: 11, color: Colors.grey.shade600)),
                         ],
                         if (parseErrors[i] != null) ...[
@@ -765,20 +956,26 @@ class _MapScreenState extends State<MapScreen> {
               ),
               actions: [
                 TextButton(
-                  onPressed: () => Navigator.pop(dialogContext),
+                  onPressed: () {
+                    dialogOpen = false;
+                    Navigator.pop(dialogContext);
+                  },
                   child: const Text('Cancel'),
                 ),
                 FilledButton(
                   onPressed: () {
-                    // Validate every slot before applying anything, so a
-                    // typo in one box doesn't silently discard the others —
-                    // fix the error(s) shown and press Save again.
-                    final parsed = List<JtwcTyphoonInfo?>.filled(_typhoonSlots.length, null);
+                    // Validate every slot's JTWC paste box before applying
+                    // anything, so a typo in one box doesn't silently
+                    // discard the others — fix the error(s) shown and press
+                    // Save again. JMA data needs no such validation step
+                    // here — it was already a successfully-parsed
+                    // JmaTyphoonInfo at fetch time (see fetchJma above).
+                    final parsedJtwc = List<JtwcTyphoonInfo?>.filled(_typhoonSlots.length, null);
                     var hasError = false;
                     for (var i = 0; i < _typhoonSlots.length; i++) {
                       final pastedText = typhoonControllers[i].text;
                       if (pastedText.trim().isEmpty) {
-                        parsed[i] = JtwcTyphoonInfo.empty;
+                        parsedJtwc[i] = JtwcTyphoonInfo.empty;
                         continue;
                       }
                       final info = parseJtwcWarningText(pastedText);
@@ -788,7 +985,7 @@ class _MapScreenState extends State<MapScreen> {
                             'line in the pasted text.';
                         continue;
                       }
-                      parsed[i] = info;
+                      parsedJtwc[i] = info;
                     }
                     if (hasError) {
                       setDialogState(() {});
@@ -799,8 +996,18 @@ class _MapScreenState extends State<MapScreen> {
                     // 発表時間」とする", e.g. "250000Z" → 25th 09:00 JST) —
                     // resolved against the real current date, not the
                     // possibly-already-shifted _startTime, so re-saving the
-                    // same text repeatedly doesn't drift the year/month.
-                    final newStartTime = parsed[0]?.issuedAtJst(DateTime.now());
+                    // same text repeatedly doesn't drift the year/month. When
+                    // slot 0 has JMA data fetched, its bulletin's own exact
+                    // JST time (already year/month-qualified — no
+                    // day-only-plus-disambiguation needed, unlike JTWC's
+                    // issuedAtJst) is used directly and takes priority,
+                    // regardless of which source(s) end up Display-on — a
+                    // fetched-but-hidden JMA time is still more precise than
+                    // reconstructing one from JTWC's day-only field.
+                    final slot0Jma = jmaFetched[0];
+                    final newStartTime = slot0Jma.isEmpty
+                        ? parsedJtwc[0]?.issuedAtJst(DateTime.now())
+                        : (slot0Jma.observedAtJst ?? slot0Jma.reportDateTimeJst);
                     setState(() {
                       _shipName = shipController.text;
                       if (newStartTime != null) {
@@ -813,11 +1020,14 @@ class _MapScreenState extends State<MapScreen> {
                       }
                       for (var i = 0; i < _typhoonSlots.length; i++) {
                         _typhoonSlots[i].pastedText = typhoonControllers[i].text;
-                        _typhoonSlots[i].info = parsed[i]!;
-                        _typhoonSlots[i].displayEnabled = typhoonDisplayLocal[i];
+                        _typhoonSlots[i].jtwcInfo = parsedJtwc[i]!;
+                        _typhoonSlots[i].jtwcDisplayEnabled = jtwcDisplayLocal[i];
+                        _typhoonSlots[i].jmaInfo = jmaFetched[i];
+                        _typhoonSlots[i].jmaDisplayEnabled = jmaDisplayLocal[i];
                       }
                     });
                     _saveState();
+                    dialogOpen = false;
                     Navigator.pop(dialogContext);
                   },
                   child: const Text('Save'),
@@ -1451,6 +1661,18 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
+  // Source-prefixed labels (2026-07-28), e.g. "JTWC12W (NOUL)"/"JMA13TS
+  // (DOLPHIN)" — shared by both the map markers (_typhoonMarkers) and the
+  // Range Ring popup menu (below) so the two never drift out of sync.
+  // [fallback] lets the menu show a placeholder when nothing's parsed yet
+  // for that source, while the map markers (which only build a marker at
+  // all once there's track data — see _typhoonMarkers) just pass null.
+  String? _jtwcMarkerLabel(_TyphoonSlot slot, {String? fallback}) =>
+      slot.jtwcInfo.designation == null ? fallback : 'JTWC${slot.jtwcInfo.designation}';
+
+  String? _jmaMarkerLabel(_TyphoonSlot slot, {String? fallback}) =>
+      slot.jmaInfo.designation == null ? fallback : 'JMA${slot.jmaInfo.designation}';
+
   // Toggles a typhoon's 100nm/200nm rings when its red icon is tapped on the
   // map (2026-08-14 request: "台風アイコン赤丸をクリックで切り替え"). Called
   // from the GestureDetector wrapped around the map's CustomPaint in
@@ -1465,15 +1687,25 @@ class _MapScreenState extends State<MapScreen> {
     final hitRadiusScene = 14 / _zoom;
     for (var i = 0; i < _typhoonSlots.length; i++) {
       final slot = _typhoonSlots[i];
-      if (!slot.displayEnabled) continue;
-      final points = _trackPointsForSlot(i);
-      if (points == null || points.isEmpty) continue;
-      final pos = positionAt(points, _currentTime);
-      final offset = MapBounds.toOffset(pos.latitude, pos.longitude);
-      if ((offset - scenePosition).distance <= hitRadiusScene) {
-        setState(() => slot.ringsEnabled = !slot.ringsEnabled);
-        _saveState();
-        return;
+      // Checks both sources independently (2026-07-28: rings are now
+      // per-source, not shared per slot — see _TyphoonSlot.jtwcRingsEnabled/
+      // jmaRingsEnabled), toggling only the tapped icon's own source.
+      final candidates = [
+        if (slot.jtwcDisplayEnabled)
+          (points: _jtwcTrackPointsForSlot(i), toggle: () => slot.jtwcRingsEnabled = !slot.jtwcRingsEnabled),
+        if (slot.jmaDisplayEnabled)
+          (points: _jmaTrackPointsForSlot(i), toggle: () => slot.jmaRingsEnabled = !slot.jmaRingsEnabled),
+      ];
+      for (final candidate in candidates) {
+        final points = candidate.points;
+        if (points == null || points.isEmpty) continue;
+        final pos = positionAt(points, _currentTime);
+        final offset = MapBounds.toOffset(pos.latitude, pos.longitude);
+        if ((offset - scenePosition).distance <= hitRadiusScene) {
+          setState(candidate.toggle);
+          _saveState();
+          return;
+        }
       }
     }
   }
@@ -1513,11 +1745,13 @@ class _MapScreenState extends State<MapScreen> {
 
   // Builds the actual [ShipMarker]s to draw: one per currently-active track
   // (see _activeShipTracks), each with its own interpolated position,
-  // past/future split, next-waypoint heading, route color, and — when a
-  // primary typhoon is loaded — its own independent distance-to-typhoon
-  // (2026-08-xx request: comparing multiple routes means each needs its own
-  // distance readout, not one shared value).
-  List<ShipMarker> _buildShipMarkers(LatLng? typhoonPosition) {
+  // past/future split, next-waypoint heading, route color, and — one entry
+  // per currently-displayed typhoon marker (2026-07-28: previously only
+  // measured to the single "primary" typhoon; now that JTWC/JMA can both be
+  // on screen at once per slot, each ship shows its distance to *every*
+  // displayed typhoon, each tagged with that typhoon's own color — see
+  // ShipTyphoonDistance/map_painter.dart — rather than one shared value).
+  List<ShipMarker> _buildShipMarkers(List<TyphoonMarker> typhoons) {
     final markers = <ShipMarker>[];
     final tracks = _activeShipTracks;
     for (var i = 0; i < tracks.length; i++) {
@@ -1533,7 +1767,13 @@ class _MapScreenState extends State<MapScreen> {
         futureRoute: split.future,
         nextWaypoint: next == null ? null : LatLng(next.latitude, next.longitude),
         label: entry.label,
-        distanceToTyphoonNm: typhoonPosition == null ? null : distanceNm(position, typhoonPosition),
+        typhoonDistances: [
+          for (final typhoon in typhoons)
+            ShipTyphoonDistance(
+              distanceNm: distanceNm(position, typhoon.currentPosition),
+              color: typhoon.color,
+            ),
+        ],
         color: _shipColors[i % _shipColors.length],
       ));
     }
@@ -1543,8 +1783,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   Widget build(BuildContext context) {
     final typhoons = _typhoonMarkers;
-    final typhoonPosition = typhoons.isEmpty ? null : typhoons.first.currentPosition;
-    final ships = _buildShipMarkers(typhoonPosition);
+    final ships = _buildShipMarkers(typhoons);
     // Whole playback bar (not just the timeline track inside it) is hidden
     // when there's nothing to scrub through — i.e. no Passage Plan and no
     // typhoon info registered (2026-07-27 request: since the sample ship/
@@ -1562,23 +1801,50 @@ class _MapScreenState extends State<MapScreen> {
             tooltip: 'Passage Plan',
             onPressed: _showPassagePlanDialog,
           ),
+          // Range Ring menu (2026-07-28 redesign): one entry per currently-
+          // displayed *source* (JTWC/JMA), not per slot — since rings are now
+          // independently toggleable per source (see
+          // _TyphoonSlot.jtwcRingsEnabled/jmaRingsEnabled), a slot showing
+          // both at once needs two separate menu rows. PopupMenuButton<int>
+          // only carries a single int per item, so the slot index and source
+          // are packed into one value (`i * 2` = JTWC, `i * 2 + 1` = JMA) and
+          // unpacked in onSelected — simpler than introducing a custom
+          // record/enum type just for this one menu's selection value.
           PopupMenuButton<int>(
             icon: const Icon(Icons.track_changes),
             tooltip: 'Range Ring',
-            onSelected: (i) {
-              setState(() => _typhoonSlots[i].ringsEnabled = !_typhoonSlots[i].ringsEnabled);
+            onSelected: (encoded) {
+              final slotIndex = encoded ~/ 2;
+              final isJma = encoded.isOdd;
+              final slot = _typhoonSlots[slotIndex];
+              setState(() {
+                if (isJma) {
+                  slot.jmaRingsEnabled = !slot.jmaRingsEnabled;
+                } else {
+                  slot.jtwcRingsEnabled = !slot.jtwcRingsEnabled;
+                }
+              });
               _saveState();
             },
             itemBuilder: (context) {
-              final entries = <PopupMenuEntry<int>>[
-                for (var i = 0; i < _typhoonSlots.length; i++)
-                  if (_typhoonSlots[i].displayEnabled && _trackPointsForSlot(i) != null)
-                    CheckedPopupMenuItem<int>(
-                      value: i,
-                      checked: _typhoonSlots[i].ringsEnabled,
-                      child: Text(_typhoonSlots[i].info.designation ?? 'Typhoon ${i + 1}'),
-                    ),
-              ];
+              final entries = <PopupMenuEntry<int>>[];
+              for (var i = 0; i < _typhoonSlots.length; i++) {
+                final slot = _typhoonSlots[i];
+                if (slot.jtwcDisplayEnabled && _jtwcTrackPointsForSlot(i) != null) {
+                  entries.add(CheckedPopupMenuItem<int>(
+                    value: i * 2,
+                    checked: slot.jtwcRingsEnabled,
+                    child: Text(_jtwcMarkerLabel(slot, fallback: 'JTWC Typhoon ${i + 1}')!),
+                  ));
+                }
+                if (slot.jmaDisplayEnabled && _jmaTrackPointsForSlot(i) != null) {
+                  entries.add(CheckedPopupMenuItem<int>(
+                    value: i * 2 + 1,
+                    checked: slot.jmaRingsEnabled,
+                    child: Text(_jmaMarkerLabel(slot, fallback: 'JMA Typhoon ${i + 1}')!),
+                  ));
+                }
+              }
               if (entries.isEmpty) {
                 entries.add(const PopupMenuItem<int>(
                   enabled: false,
@@ -1948,17 +2214,40 @@ class _MapScreenState extends State<MapScreen> {
 // re-opening the dialog shows what was pasted last, separate from `info`
 // (the parsed result actually used for drawing/labeling).
 class _TyphoonSlot {
+  // JTWC (pasted warning text) source.
   String pastedText = '';
-  JtwcTyphoonInfo info = JtwcTyphoonInfo.empty;
-  bool displayEnabled = true;
+  JtwcTyphoonInfo jtwcInfo = JtwcTyphoonInfo.empty;
+  bool jtwcDisplayEnabled = true;
+
+  // JMA (auto-fetched VPTW60 bulletin via "Fetch from JMA") source (2026-
+  // 07-28 addition: "気象庁と米軍の予報を両方表示、それぞれDisplayで単独表示
+  // 可能に"). Kept as the raw [JmaTyphoonInfo] rather than converted into
+  // [JtwcTyphoonInfo] (an earlier version of this feature did that
+  // conversion) — [JmaTyphoonInfo.toTrackPoints] carries each forecast
+  // point's exact absolute JST time directly, avoiding the lossy "offset
+  // hours from the observed time, truncated to a whole hour" representation
+  // an Agent review flagged when this was first wired up as a single
+  // JTWC-shaped override. Session-only, same as before: not persisted by
+  // AppStateStorage (see _restoreState/_saveState) — a fresh fetch is
+  // needed after every app restart until the separate Wi-Fi-cache TASKS.md
+  // item is implemented.
+  JmaTyphoonInfo jmaInfo = JmaTyphoonInfo.empty;
+  bool jmaDisplayEnabled = false;
 
   // 100nm/200nm distance rings (2026-08-14 request). Toggled from the
-  // AppBar's Range Ring menu (_RingsMenuAction) or by tapping the typhoon's
-  // red icon on the map (see _handleMapTap) — both act directly on this
-  // flag via setState, no dialog/Save step needed ("メニューでのワンクリック
-  // ...で切り替え"). Default changed to on (2026-07-27 request: "Range
-  // Ring：On" at app launch) — previously defaulted off.
-  bool ringsEnabled = true;
+  // AppBar's Range Ring menu or by tapping a displayed typhoon icon on the
+  // map (see _handleMapTap) — both act directly on these flags via setState,
+  // no dialog/Save step needed ("メニューでのワンクリック...で切り替え").
+  // Default changed to on (2026-07-27 request: "Range Ring：On" at app
+  // launch) — previously defaulted off. Split into one flag per source
+  // (2026-07-28 request: "Range Ringは双方表示している際に別々にOn/Offがで
+  // きる" — a single shared flag, the original design when only one source
+  // could ever be shown per slot, no longer made sense once JTWC/JMA could
+  // both be displayed for the same slot at once). jmaRingsEnabled is
+  // session-only, same as the rest of the JMA source's state (see jmaInfo
+  // doc comment) — not persisted by AppStateStorage.
+  bool jtwcRingsEnabled = true;
+  bool jmaRingsEnabled = true;
 }
 
 // Downward-pointing tail under the playback bar's time bubble.
