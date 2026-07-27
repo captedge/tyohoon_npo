@@ -10,7 +10,7 @@ import '../utils/map_bounds.dart';
 /// one active typhoon at once, up to 3).
 ///
 /// Modeled after the ship: [track] is the *entire* chronological track
-/// (like [MapPainter.shipRoute]) and is drawn persistently — with markers at
+/// (like [ShipMarker.route]) and is drawn persistently — with markers at
 /// every point regardless of the time slider ("台風の軌跡は船のように残して
 /// ください", 2026-07-28) — split into [pastTrack] (already elapsed, drawn
 /// solid) and [futureTrack] (still ahead, drawn dotted; 2026-08-03 request).
@@ -49,27 +49,64 @@ class TyphoonMarker {
   });
 }
 
-/// Draws the simplified plot map: a lat/lon grid, coastline, the typhoon
-/// tracks, and the ship/typhoon markers with a distance line between the
-/// ship and the first (primary) typhoon.
+/// One ship/route to draw — either the single fallback sample track, or one
+/// entry per Display-on registered Passage Plan (2026-08-xx request: compare
+/// multiple route options from the same departure port/time to different
+/// destinations, each running fully independently — *not* concatenated into
+/// one combined track like an earlier, since-reverted design attempted for a
+/// different use case).
+///
+/// Modeled after [TyphoonMarker]: [route] is the whole track (past+future,
+/// for the waypoint dots), split into [pastRoute] (solid) / [futureRoute]
+/// (dotted) at the current slider time, sharing the interpolated
+/// [position] as their boundary. [label] is the plan's name (or the
+/// user-entered "Ship's Name" for the sample/fallback track) — since
+/// multiple routes can be on screen at once, each needs its own label rather
+/// than one shared "Ship" caption. [distanceToTyphoonNm] is this ship's own
+/// distance to the primary typhoon at the current time (null when there's no
+/// typhoon to compare against) — computed independently per ship so each
+/// route's distance line/readout is its own, not shared.
+class ShipMarker {
+  final LatLng position;
+  final List<LatLng> route;
+  final List<LatLng> pastRoute;
+  final List<LatLng> futureRoute;
+  final LatLng? nextWaypoint;
+  final String label;
+  final double? distanceToTyphoonNm;
+
+  /// Per-route color (2026-08-xx request: comparing multiple routes from the
+  /// same departure port/time made them hard to tell apart when all drawn
+  /// the same blue). Assigned by the caller (map_screen.dart, cycling
+  /// through a fixed palette by list position) and used for this route's
+  /// line/waypoint dots and its ship icon tint — not its text labels, which
+  /// stay black for legibility against the sea/land background.
+  final Color color;
+
+  const ShipMarker({
+    required this.position,
+    required this.route,
+    required this.pastRoute,
+    required this.futureRoute,
+    this.nextWaypoint,
+    required this.label,
+    this.distanceToTyphoonNm,
+    this.color = Colors.blue,
+  });
+}
+
+/// Draws the simplified plot map: a lat/lon grid, coastline, the ship/
+/// typhoon tracks, and their markers, with a distance line between each ship
+/// and the first (primary) typhoon.
 ///
 /// Always paints into a canvas sized [MapBounds.canvasSize] (see that
 /// class for why) — the `size` passed to [paint] should match it.
 class MapPainter extends CustomPainter {
-  final LatLng shipPosition;
+  /// Every ship/route to draw (2026-08-xx: 0, 1, or many — see [ShipMarker]),
+  /// already filtered to "Display checkbox on" by the caller (map_screen.dart)
+  /// — this painter just draws whatever's in the list, in order.
+  final List<ShipMarker> ships;
 
-  /// Every waypoint of the voyage plan, past and future — used only to draw
-  /// the small dot marker at each waypoint. The line itself is drawn from
-  /// [shipPastRoute]/[shipFutureRoute] instead (2026-08-03 split).
-  final List<LatLng> shipRoute;
-
-  /// Portion of [shipRoute] already sailed (drawn solid) / not yet reached
-  /// (drawn dotted) — see `splitTrackAtTime`. Both share the current
-  /// interpolated ship position as their boundary point.
-  final List<LatLng> shipPastRoute;
-  final List<LatLng> shipFutureRoute;
-
-  final double distanceNauticalMiles;
   final List<List<LatLng>> coastlinePolygons;
 
   /// Current map zoom (InteractiveViewer's scale). Used to counter-scale
@@ -83,27 +120,10 @@ class MapPainter extends CustomPainter {
 
   double get _invZoom => zoom > 0 ? 1 / zoom : 1.0;
 
-  /// The next waypoint ahead of [shipPosition] in time, used so the ship
-  /// icon's apex points toward it (2026-07-27 request) instead of always
-  /// pointing north. Null once the voyage is complete (no waypoint left
-  /// ahead) or if there's only a single track point — the icon then falls
-  /// back to pointing north.
-  final LatLng? nextWaypoint;
-
-  /// Label drawn next to the ship icon (2026-07-28 request: user-entered
-  /// "Ship's Name" instead of the generic "Ship", since NAVTOR-format
-  /// voyage-plan CSVs don't carry a ship name field). Defaults to 'Ship'
-  /// when the user hasn't set one.
-  final String shipLabel;
-
-  /// Whether to draw the ship at all (route, marker, label) — 2026-07-28
-  /// "Display" checkbox request.
-  final bool showShip;
-
   /// Up to 3 typhoons (2026-07-28 request), already filtered to "Display
   /// checkbox on" and "has at least a current position" by the caller —
   /// this painter just draws whatever's in the list, in order. The distance
-  /// line/readout (when [showShip] is also true) measures to `typhoons.first`.
+  /// line/readout for each ship (when present) measures to `typhoons.first`.
   final List<TyphoonMarker> typhoons;
 
   /// Ship/typhoon marker icon images (2026-08-xx request: replace the
@@ -113,19 +133,14 @@ class MapPainter extends CustomPainter {
   /// until that load completes, in which case the previous placeholder
   /// shape is drawn instead so the map isn't left blank while the asset
   /// decodes (same "graceful until loaded" pattern as CoastlineData.empty).
+  /// [shipIcon] is shared by every entry in [ships] — all routes use the
+  /// same icon graphic, distinguished by their [ShipMarker.label] instead.
   final ui.Image? shipIcon;
   final ui.Image? typhoonIcon;
 
   MapPainter({
-    required this.shipPosition,
-    required this.shipRoute,
-    required this.shipPastRoute,
-    required this.shipFutureRoute,
-    required this.distanceNauticalMiles,
+    this.ships = const [],
     this.coastlinePolygons = const [],
-    this.nextWaypoint,
-    this.shipLabel = 'Ship',
-    this.showShip = true,
     this.typhoons = const [],
     this.zoom = 1.0,
     this.shipIcon,
@@ -137,35 +152,41 @@ class MapPainter extends CustomPainter {
     _drawSea(canvas, size);
     _drawGrid(canvas);
     _drawCoastline(canvas);
-    if (showShip) _drawShipRoute(canvas);
+    for (final ship in ships) {
+      _drawShipRoute(canvas, ship);
+    }
     for (final typhoon in typhoons) {
       _drawTyphoonTrack(canvas, typhoon);
     }
-    if (showShip && typhoons.isNotEmpty) {
-      _drawDistanceLine(canvas, typhoons.first.currentPosition);
+    if (typhoons.isNotEmpty) {
+      for (final ship in ships) {
+        _drawDistanceLine(canvas, ship.position, typhoons.first.currentPosition);
+      }
     }
-    if (showShip) _drawShip(canvas);
+    for (final ship in ships) {
+      _drawShip(canvas, ship);
+    }
     for (final typhoon in typhoons) {
       _drawTyphoonMarker(canvas, typhoon);
     }
   }
 
   // Planned route, split at the current slider time (2026-08-03): the
-  // already-sailed portion (shipPastRoute) as a solid line, the remaining
-  // portion (shipFutureRoute) as a dotted line — plus a small fixed-size dot
+  // already-sailed portion (pastRoute) as a solid line, the remaining
+  // portion (futureRoute) as a dotted line — plus a small fixed-size dot
   // marker at every waypoint (past and future alike). The current ship
   // position is drawn separately, on top, by _drawShip.
-  void _drawShipRoute(Canvas canvas) {
-    if (shipRoute.length < 2) return;
-    _drawPolyline(canvas, shipPastRoute, Colors.blue.shade600, dashed: false);
-    _drawPolyline(canvas, shipFutureRoute, Colors.blue.shade600, dashed: true);
+  void _drawShipRoute(Canvas canvas, ShipMarker ship) {
+    if (ship.route.length < 2) return;
+    _drawPolyline(canvas, ship.pastRoute, ship.color, dashed: false);
+    _drawPolyline(canvas, ship.futureRoute, ship.color, dashed: true);
 
-    final wptPaint = Paint()..color = Colors.blue.shade100;
+    final wptPaint = Paint()..color = ship.color.withOpacity(0.35);
     final wptBorder = Paint()
-      ..color = Colors.blue.shade700
+      ..color = ship.color
       ..style = PaintingStyle.stroke
       ..strokeWidth = 1.2;
-    for (final p in shipRoute) {
+    for (final p in ship.route) {
       _drawFixedCircle(canvas, MapBounds.toOffset(p.latitude, p.longitude), 3.5, wptPaint, wptBorder);
     }
   }
@@ -320,7 +341,7 @@ class MapPainter extends CustomPainter {
     }
   }
 
-  void _drawDistanceLine(Canvas canvas, LatLng typhoonPosition) {
+  void _drawDistanceLine(Canvas canvas, LatLng shipPosition, LatLng typhoonPosition) {
     final shipOffset = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
     final typhoonOffset = MapBounds.toOffset(typhoonPosition.latitude, typhoonPosition.longitude);
     final dashPaint = Paint()
@@ -331,13 +352,13 @@ class MapPainter extends CustomPainter {
       ..lineTo(typhoonOffset.dx, typhoonOffset.dy);
     canvas.drawPath(_dashed(path, dashLength: 4, gapLength: 3), dashPaint);
 
-    // The distance readout itself is now drawn together with the ship name
-    // label in _drawShip (2026-08-xx request: both stack behind the ship,
-    // name innermost / distance outermost), so nothing else to draw here.
+    // The distance readout itself is drawn together with the ship's name
+    // label in _drawShip (both stack behind the ship, name innermost /
+    // distance outermost), so nothing else to draw here.
   }
 
   // Distance readout, pinned behind the ship — i.e. the opposite direction
-  // from its heading toward nextWaypoint (2026-07-28 request: a fixed
+  // from its heading toward its next waypoint (2026-07-28 request: a fixed
   // "always to the left" position looked wrong once the ship is sailing
   // west, since "left" then points into its direction of travel). Distance
   // from the ship, box size, and colors are unchanged from the previous
@@ -354,11 +375,13 @@ class MapPainter extends CustomPainter {
   // canvas space (so this stacks correctly with the name label drawn in the
   // same space) and passes in [behind] (unit direction) and [startDistance]
   // (how far along that direction this box's near edge should start, i.e.
-  // past whatever's already stacked closer to the ship).
-  void _drawDistanceLabel(Canvas canvas, Offset behind, double startDistance) {
+  // past whatever's already stacked closer to the ship). [distanceNm] is now
+  // per-ship (each route has its own distance to the primary typhoon) rather
+  // than a single painter-wide value.
+  void _drawDistanceLabel(Canvas canvas, Offset behind, double startDistance, double distanceNm) {
     const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
     final painter = TextPainter(
-      text: TextSpan(text: '${distanceNauticalMiles.round()} nm', style: style),
+      text: TextSpan(text: '${distanceNm.round()} nm', style: style),
       textDirection: TextDirection.ltr,
     )..layout();
 
@@ -383,14 +406,14 @@ class MapPainter extends CustomPainter {
     painter.paint(canvas, Offset(rect.left + paddingH, rect.top + paddingV));
   }
 
-  // Unit vector pointing opposite the ship's heading toward nextWaypoint —
+  // Unit vector pointing opposite a ship's heading toward its next waypoint —
   // the same heading _drawShip rotates its icon toward, just reversed and
   // normalized here since this needs a direction to offset along rather
   // than a rotation angle. Falls back to south (opposite of the default
   // north-pointing icon) when there's no next waypoint, matching _drawShip's
   // own fallback for that case.
-  Offset _shipBehindDirection(Offset shipOffset) {
-    final next = nextWaypoint;
+  Offset _shipBehindDirection(ShipMarker ship, Offset shipOffset) {
+    final next = ship.nextWaypoint;
     if (next != null) {
       final target = MapBounds.toOffset(next.latitude, next.longitude);
       final dx = target.dx - shipOffset.dx;
@@ -404,8 +427,8 @@ class MapPainter extends CustomPainter {
   }
 
   // Unit vector pointing opposite a typhoon's direction of travel, used to
-  // place its designation label "behind" it the same way the ship's name
-  // sits behind the ship (2026-08-xx request). Unlike the ship there's no
+  // place its designation label "behind" it the same way a ship's name sits
+  // behind the ship (2026-08-xx request). Unlike the ship there's no
   // explicit "next waypoint" — direction is inferred from the track itself:
   // prefer the next forecast point just ahead of the current (interpolated)
   // position ([futureTrack]'s second point, since its first point is always
@@ -433,12 +456,12 @@ class MapPainter extends CustomPainter {
     return const Offset(0, 1); // south, same no-data fallback as the ship
   }
 
-  // Ship icon: an isosceles triangle whose apex points toward nextWaypoint
-  // (2026-07-27 request) instead of always pointing north. The bearing is
-  // computed directly in canvas (projected) space rather than on the
-  // sphere — fine at this scale, since Web Mercator is conformal (locally
-  // angle-preserving), and it keeps this in the same coordinate space as
-  // everything else the painter draws.
+  // Ship icon: an isosceles triangle whose apex points toward its next
+  // waypoint (2026-07-27 request) instead of always pointing north. The
+  // bearing is computed directly in canvas (projected) space rather than on
+  // the sphere — fine at this scale, since Web Mercator is conformal
+  // (locally angle-preserving), and it keeps this in the same coordinate
+  // space as everything else the painter draws.
   //
   // 2026-08-03: both the icon and its label are drawn inside a
   // translate+scale(1/zoom) block (fixed-size request) so they stay a
@@ -453,15 +476,21 @@ class MapPainter extends CustomPainter {
   // request, i.e. near the stern/keel notch visible in the artwork — that
   // point, not the image's bounding-box center, is what's placed at the
   // ship's actual lat/lon and what canvas.rotate below pivots around.
+  //
+  // 2026-08-xx: this now draws one [ShipMarker] at a time (called in a loop
+  // from paint()) instead of the single ship this painter used to carry —
+  // multiple routes (e.g. comparing destination options from the same
+  // departure port/time) can be on screen at once, each with its own icon,
+  // label, and distance-to-typhoon readout.
   static const double _shipIconDisplayHeightPx = 26.0;
   static const double _shipIconAnchorXFrac = 0.5;
   static const double _shipIconAnchorYFrac = 0.85; // 15% up from the bottom
 
-  void _drawShip(Canvas canvas) {
-    final o = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
+  void _drawShip(Canvas canvas, ShipMarker ship) {
+    final o = MapBounds.toOffset(ship.position.latitude, ship.position.longitude);
 
     var angle = 0.0; // radians, clockwise from north (0 = pointing up)
-    final next = nextWaypoint;
+    final next = ship.nextWaypoint;
     if (next != null) {
       final target = MapBounds.toOffset(next.latitude, next.longitude);
       final dx = target.dx - o.dx;
@@ -486,14 +515,22 @@ class MapPainter extends CustomPainter {
         icon,
         Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
         Rect.fromLTWH(-anchorX, -anchorY, displayWidth, displayHeight),
-        Paint()..filterQuality = FilterQuality.medium,
+        // Tinted to this route's color (2026-08-xx: distinguish multiple
+        // routes compared from the same departure port/time) via a srcIn
+        // color filter — this replaces the icon's own shading with a flat
+        // silhouette in [ship.color], which reads clearly as "this route's
+        // color" at the map's small icon size, at the cost of the original
+        // artwork's shading detail.
+        Paint()
+          ..filterQuality = FilterQuality.medium
+          ..colorFilter = ColorFilter.mode(ship.color, BlendMode.srcIn),
       );
     } else {
       // Fallback while the icon asset is still decoding (loadUiImage is
       // async) so the map isn't left blank for a frame or two.
-      final paint = Paint()..color = Colors.blue.shade400;
+      final paint = Paint()..color = ship.color;
       final border = Paint()
-        ..color = Colors.blue.shade900
+        ..color = Color.lerp(ship.color, Colors.black, 0.4)!
         ..style = PaintingStyle.stroke
         ..strokeWidth = 1.5;
       final path = Path()
@@ -509,19 +546,19 @@ class MapPainter extends CustomPainter {
     // Ship name + distance-to-typhoon, stacked behind the ship (2026-08-xx
     // request: labels used to sit fixed to the right of the icon; now both
     // always follow the "behind" direction — opposite of the heading toward
-    // nextWaypoint, same direction the distance box already used — so they
-    // read naturally regardless of which way the ship is heading. Stacked
-    // with the name innermost (closer to the ship) and the distance box
-    // outermost so the two never overlap. Font size/weight/color for the
+    // the next waypoint, same direction the distance box already used — so
+    // they read naturally regardless of which way the ship is heading.
+    // Stacked with the name innermost (closer to the ship) and the distance
+    // box outermost so the two never overlap. Font size/weight/color for the
     // name are unchanged from before.
-    final behind = _shipBehindDirection(o);
+    final behind = _shipBehindDirection(ship, o);
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
 
     const nameStyle = TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600);
     final namePainter = TextPainter(
-      text: TextSpan(text: shipLabel, style: nameStyle),
+      text: TextSpan(text: ship.label, style: nameStyle),
       textDirection: TextDirection.ltr,
     )..layout();
 
@@ -532,8 +569,9 @@ class MapPainter extends CustomPainter {
     final nameCenter = behind * nameDistance;
     namePainter.paint(canvas, nameCenter - Offset(namePainter.width / 2, namePainter.height / 2));
 
-    if (typhoons.isNotEmpty) {
-      _drawDistanceLabel(canvas, behind, nameDistance + nameDiagonal / 2 + stackGap);
+    final distanceNm = ship.distanceToTyphoonNm;
+    if (distanceNm != null) {
+      _drawDistanceLabel(canvas, behind, nameDistance + nameDiagonal / 2 + stackGap, distanceNm);
     }
     canvas.restore();
   }
@@ -698,21 +736,32 @@ class MapPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant MapPainter oldDelegate) {
-    return oldDelegate.shipPosition.latitude != shipPosition.latitude ||
-        oldDelegate.shipPosition.longitude != shipPosition.longitude ||
-        oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
-        oldDelegate.shipRoute.length != shipRoute.length ||
-        oldDelegate.shipPastRoute.length != shipPastRoute.length ||
-        oldDelegate.shipFutureRoute.length != shipFutureRoute.length ||
-        oldDelegate.nextWaypoint?.latitude != nextWaypoint?.latitude ||
-        oldDelegate.nextWaypoint?.longitude != nextWaypoint?.longitude ||
-        oldDelegate.shipLabel != shipLabel ||
-        oldDelegate.showShip != showShip ||
+    return oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
         oldDelegate.zoom != zoom ||
         oldDelegate.shipIcon != shipIcon ||
         oldDelegate.typhoonIcon != typhoonIcon ||
+        oldDelegate.ships.length != ships.length ||
+        _shipsChanged(oldDelegate.ships) ||
         oldDelegate.typhoons.length != typhoons.length ||
         _typhoonsChanged(oldDelegate.typhoons);
+  }
+
+  bool _shipsChanged(List<ShipMarker> old) {
+    for (var i = 0; i < ships.length && i < old.length; i++) {
+      if (old[i].label != ships[i].label ||
+          old[i].color != ships[i].color ||
+          old[i].distanceToTyphoonNm != ships[i].distanceToTyphoonNm ||
+          old[i].route.length != ships[i].route.length ||
+          old[i].pastRoute.length != ships[i].pastRoute.length ||
+          old[i].futureRoute.length != ships[i].futureRoute.length ||
+          old[i].position.latitude != ships[i].position.latitude ||
+          old[i].position.longitude != ships[i].position.longitude ||
+          old[i].nextWaypoint?.latitude != ships[i].nextWaypoint?.latitude ||
+          old[i].nextWaypoint?.longitude != ships[i].nextWaypoint?.longitude) {
+        return true;
+      }
+    }
+    return false;
   }
 
   bool _typhoonsChanged(List<TyphoonMarker> old) {

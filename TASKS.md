@@ -13,3 +13,6 @@
 
 - より高精細な海岸線データ（1:10m相当）への差し替え（優先度低、`docs/devlog-map-design.md`参照）
 - 航海計画編集画面の緯度経度入力は現在10進度（decimal degrees）。他画面の度分（deg-min）表記と揃えるかは今後ユーザーに確認
+- Passage Planの各エントリ名は現状CSVファイル名固定（拡張子除く）で、後から改名するUIは未実装。改名したい場合の要望があれば追加検討（`docs/devlog-passage-plan-multi.md`参照）
+- Windows機での実機確認が必要（複数CSV登録・Edit/Delete/Display個別トグル・同一出発港/時刻からの複数ルート比較表示・ルートごとの色分け・Ship's Name欄の見た目）
+- 船アイコンを色ごとに10種類（専用PNG画像）用意したい、とのユーザー希望あり。現在は`assets/ship_icon01.png`を`ColorFilter`で機械的に着色しているだけなので、専用画像を用意する場合はカラーコード一覧（`docs/devlog-passage-plan-multi.md`参照）に合わせて作成し、画像が揃い次第、着色方式から画像切替方式へ変更するか相談する
