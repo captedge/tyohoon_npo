@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/gestures.dart';
@@ -12,6 +13,7 @@ import '../utils/coastline.dart';
 import '../utils/interpolation.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
+import '../utils/marker_icons.dart';
 import '../utils/voyage_plan.dart';
 import '../utils/voyage_plan_parser.dart';
 import '../widgets/map_painter.dart';
@@ -108,10 +110,11 @@ class _MapScreenState extends State<MapScreen> {
   // Playback speed as a multiplier of the original fixed-speed behavior
   // (1.0 = "1 simulated hour per 200ms tick", which is what this screen
   // always did before). 2026-07-28 request: default to 50% (half as fast
-  // as before), adjustable from 25% to 150% — see _showPlaybackSpeedDialog.
+  // as before). Range changed 2026-07-27 from 25%-150% to 1%-100% (user
+  // request) — see _showPlaybackSpeedDialog.
   double _playbackSpeed = 0.5;
-  static const double _minPlaybackSpeed = 0.25;
-  static const double _maxPlaybackSpeed = 1.5;
+  static const double _minPlaybackSpeed = 0.01;
+  static const double _maxPlaybackSpeed = 1.0;
 
   // _zoom/_translation are in MapBounds.canvasSize units (a fixed logical
   // size — see MapBounds for why). _fitScale/_coverFitScale (below) depend
@@ -146,6 +149,13 @@ class _MapScreenState extends State<MapScreen> {
 
   CoastlineData _coastline = CoastlineData.empty;
 
+  // Ship/typhoon marker icon images (2026-08-xx request: replace the
+  // placeholder triangle/circle with assets/ship_icon01.png and
+  // assets/typhoon_icon01.png). Null until loaded — MapPainter falls back
+  // to the old placeholder shapes for the frame(s) before that.
+  ui.Image? _shipIcon;
+  ui.Image? _typhoonIcon;
+
   // User-entered ship name (2026-07-28 request: NAVTOR-format voyage-plan
   // CSVs don't carry a ship name field, so it's entered here instead), plus
   // a Display on/off toggle for the ship (also 2026-07-28). See
@@ -161,7 +171,14 @@ class _MapScreenState extends State<MapScreen> {
   // below) when nothing's been pasted yet, so the app still has something
   // to demo; slots 1-2 only appear once real data is pasted for them. All
   // 3 are otherwise treated the same — see _typhoonMarkers below.
-  final List<_TyphoonSlot> _typhoonSlots = List.generate(3, (_) => _TyphoonSlot());
+  //
+  // Default Display on/off (2026-07-27 request): only Ship and Typhoon 1 are
+  // on at app launch — slots 1-2 default off since they have no data to show
+  // until the user pastes a JTWC text for them anyway.
+  final List<_TyphoonSlot> _typhoonSlots = List.generate(
+    3,
+    (i) => _TyphoonSlot()..displayEnabled = i == 0,
+  );
 
   // Sample forecast for slot 0 when no JTWC text has been pasted for it yet
   // (renamed from _typhoonTrack, 2026-07-28, now that real pasted data can
@@ -240,6 +257,12 @@ class _MapScreenState extends State<MapScreen> {
     CoastlineData.load().then((data) {
       if (mounted) setState(() => _coastline = data);
     });
+    loadUiImage('assets/ship_icon01.png').then((image) {
+      if (mounted) setState(() => _shipIcon = image);
+    });
+    loadUiImage('assets/typhoon_icon01.png').then((image) {
+      if (mounted) setState(() => _typhoonIcon = image);
+    });
     // Keeps (_zoom, _translation) mirroring the controller's actual value
     // for *any* change to it — drag, pinch, or InteractiveViewer's own
     // built-in mouse-wheel zoom (see 2026-07-28 bug fix note on
@@ -277,10 +300,12 @@ class _MapScreenState extends State<MapScreen> {
   }
 
   // Dialog for adjusting playback speed (2026-07-28 request: "今より50%
-  // 遅くする、または再生スピードを調整できるようにする"), 25%-150% of the
-  // original fixed speed, defaulting to 50%. Takes effect immediately —
-  // _togglePlay's timer reads _playbackSpeed fresh on every tick, so
-  // changing it mid-playback doesn't require a restart.
+  // 遅くする、または再生スピードを調整できるようにする"), defaulting to
+  // 50% of the original fixed speed. Range changed 2026-07-27 from
+  // 25%-150% to 1%-100% (user request); 1% steps below match the new
+  // integer-percent range. Takes effect immediately — _togglePlay's timer
+  // reads _playbackSpeed fresh on every tick, so changing it mid-playback
+  // doesn't require a restart.
   Future<void> _showPlaybackSpeedDialog() async {
     var speedLocal = _playbackSpeed;
     await showDialog<void>(
@@ -289,7 +314,7 @@ class _MapScreenState extends State<MapScreen> {
         return StatefulBuilder(
           builder: (dialogContext, setDialogState) {
             return AlertDialog(
-              title: const Text('Playback speed'),
+              title: const Text("Play Sp'd"),
               content: SizedBox(
                 width: 320,
                 child: Column(
@@ -302,7 +327,7 @@ class _MapScreenState extends State<MapScreen> {
                     Slider(
                       min: _minPlaybackSpeed,
                       max: _maxPlaybackSpeed,
-                      divisions: ((_maxPlaybackSpeed - _minPlaybackSpeed) / 0.05).round(),
+                      divisions: ((_maxPlaybackSpeed - _minPlaybackSpeed) / 0.01).round(),
                       value: speedLocal,
                       label: '${(speedLocal * 100).round()}%',
                       onChanged: (v) => setDialogState(() => speedLocal = v),
@@ -581,7 +606,7 @@ class _MapScreenState extends State<MapScreen> {
             }
 
             return AlertDialog(
-              title: const Text("Ship's Name / Typhoons"),
+              title: const Text('Information'),
               content: SizedBox(
                 width: 460,
                 height: 560,
@@ -753,7 +778,7 @@ class _MapScreenState extends State<MapScreen> {
     final picked = await FilePicker.platform.pickFiles(
       type: FileType.custom,
       allowedExtensions: ['csv'],
-      dialogTitle: 'Select voyage plan CSV',
+      dialogTitle: 'Select passage plan CSV',
     );
     final path = picked?.files.single.path;
     if (path == null || !mounted) return; // user cancelled, or web (no path)
@@ -833,7 +858,7 @@ class _MapScreenState extends State<MapScreen> {
         actions: [
           PopupMenuButton<_VoyagePlanMenuAction>(
             icon: const Icon(Icons.directions_boat),
-            tooltip: 'Voyage plan',
+            tooltip: 'Passage Plan',
             onSelected: (action) {
               switch (action) {
                 case _VoyagePlanMenuAction.importCsv:
@@ -852,13 +877,13 @@ class _MapScreenState extends State<MapScreen> {
               PopupMenuItem(
                 value: _VoyagePlanMenuAction.edit,
                 enabled: _shipWaypoints.isNotEmpty,
-                child: const Text('Edit voyage plan...'),
+                child: const Text('Edit passage plan...'),
               ),
             ],
           ),
           PopupMenuButton<int>(
             icon: const Icon(Icons.track_changes),
-            tooltip: '100/200nm rings',
+            tooltip: 'Range Ring',
             onSelected: (i) => setState(() => _typhoonSlots[i].ringsEnabled = !_typhoonSlots[i].ringsEnabled),
             itemBuilder: (context) {
               final entries = <PopupMenuEntry<int>>[
@@ -880,13 +905,8 @@ class _MapScreenState extends State<MapScreen> {
             },
           ),
           IconButton(
-            icon: const Icon(Icons.speed),
-            tooltip: 'Playback speed',
-            onPressed: _showPlaybackSpeedDialog,
-          ),
-          IconButton(
             icon: const Icon(Icons.edit_note),
-            tooltip: "Ship's Name / Typhoon label",
+            tooltip: 'Information',
             onPressed: _showLabelSettingsDialog,
           ),
         ],
@@ -948,6 +968,8 @@ class _MapScreenState extends State<MapScreen> {
                             zoom: _zoom,
                             showShip: _shipDisplayEnabled,
                             typhoons: typhoons,
+                            shipIcon: _shipIcon,
+                            typhoonIcon: _typhoonIcon,
                           ),
                         ),
                       ),
@@ -1060,17 +1082,37 @@ class _MapScreenState extends State<MapScreen> {
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
+          // Playback speed button + play/pause, stacked vertically
+          // (2026-07-27 request: move the speed control down from the
+          // AppBar to sit directly above the play button, without widening
+          // this column or the playback bar itself — both icons are shrunk
+          // from their previous single-icon sizes to fit the same 52px
+          // column within the bar's existing 88px height).
           SizedBox(
             width: 52,
-            child: Center(
-              child: IconButton(
-                icon: Icon(
-                  _isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                  size: 34,
-                  color: Colors.orange.shade700,
+            child: Column(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  icon: const Icon(Icons.speed),
+                  iconSize: 18,
+                  color: Colors.white70,
+                  tooltip: "Play Sp'd",
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 36, minHeight: 28),
+                  onPressed: _showPlaybackSpeedDialog,
                 ),
-                onPressed: _togglePlay,
-              ),
+                IconButton(
+                  icon: Icon(
+                    _isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                    size: 28,
+                    color: Colors.orange.shade700,
+                  ),
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+                  onPressed: _togglePlay,
+                ),
+              ],
             ),
           ),
           Expanded(child: _buildTimelineTrack()),
@@ -1235,12 +1277,13 @@ class _TyphoonSlot {
   JtwcTyphoonInfo info = JtwcTyphoonInfo.empty;
   bool displayEnabled = true;
 
-  // 100nm/200nm distance rings (2026-08-14 request), off by default.
-  // Toggled from the AppBar's rings menu (_RingsMenuAction) or by tapping
-  // the typhoon's red icon on the map (see _handleMapTap) — both act
-  // directly on this flag via setState, no dialog/Save step needed ("メニュー
-  // でのワンクリック...で切り替え").
-  bool ringsEnabled = false;
+  // 100nm/200nm distance rings (2026-08-14 request). Toggled from the
+  // AppBar's Range Ring menu (_RingsMenuAction) or by tapping the typhoon's
+  // red icon on the map (see _handleMapTap) — both act directly on this
+  // flag via setState, no dialog/Save step needed ("メニューでのワンクリック
+  // ...で切り替え"). Default changed to on (2026-07-27 request: "Range
+  // Ring：On" at app launch) — previously defaulted off.
+  bool ringsEnabled = true;
 }
 
 // Downward-pointing tail under the playback bar's time bubble.

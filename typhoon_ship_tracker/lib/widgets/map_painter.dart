@@ -1,4 +1,5 @@
 import 'dart:math' as math;
+import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
@@ -105,6 +106,16 @@ class MapPainter extends CustomPainter {
   /// line/readout (when [showShip] is also true) measures to `typhoons.first`.
   final List<TyphoonMarker> typhoons;
 
+  /// Ship/typhoon marker icon images (2026-08-xx request: replace the
+  /// placeholder triangle/circle with `assets/ship_icon01.png` /
+  /// `assets/typhoon_icon01.png`). Loaded once in map_screen.dart
+  /// (`loadUiImage`, lib/utils/marker_icons.dart) and passed in here — null
+  /// until that load completes, in which case the previous placeholder
+  /// shape is drawn instead so the map isn't left blank while the asset
+  /// decodes (same "graceful until loaded" pattern as CoastlineData.empty).
+  final ui.Image? shipIcon;
+  final ui.Image? typhoonIcon;
+
   MapPainter({
     required this.shipPosition,
     required this.shipRoute,
@@ -117,6 +128,8 @@ class MapPainter extends CustomPainter {
     this.showShip = true,
     this.typhoons = const [],
     this.zoom = 1.0,
+    this.shipIcon,
+    this.typhoonIcon,
   });
 
   @override
@@ -432,13 +445,20 @@ class MapPainter extends CustomPainter {
   // constant on-screen size at any map zoom, instead of growing/shrinking
   // with it. The heading angle itself is still computed from the real
   // (non-fixed-scale) scene offsets — a geometry question, not a sizing one.
+  // Ship icon: assets/ship_icon01.png, bow drawn pointing "up" in the
+  // source image — same up-is-north convention the previous placeholder
+  // triangle used, so the existing heading-rotation math (angle=0 → apex/
+  // bow pointing up) applies unchanged. Anchored not at its own center but
+  // at (horizontal center, 15% up from the bottom edge) per the 2026-08-xx
+  // request, i.e. near the stern/keel notch visible in the artwork — that
+  // point, not the image's bounding-box center, is what's placed at the
+  // ship's actual lat/lon and what canvas.rotate below pivots around.
+  static const double _shipIconDisplayHeightPx = 26.0;
+  static const double _shipIconAnchorXFrac = 0.5;
+  static const double _shipIconAnchorYFrac = 0.85; // 15% up from the bottom
+
   void _drawShip(Canvas canvas) {
     final o = MapBounds.toOffset(shipPosition.latitude, shipPosition.longitude);
-    final paint = Paint()..color = Colors.blue.shade400;
-    final border = Paint()
-      ..color = Colors.blue.shade900
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1.5;
 
     var angle = 0.0; // radians, clockwise from north (0 = pointing up)
     final next = nextWaypoint;
@@ -451,18 +471,39 @@ class MapPainter extends CustomPainter {
       }
     }
 
-    final path = Path()
-      ..moveTo(0, -8)
-      ..lineTo(7, 7)
-      ..lineTo(-7, 7)
-      ..close();
-
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
     canvas.rotate(angle);
-    canvas.drawPath(path, paint);
-    canvas.drawPath(path, border);
+
+    final icon = shipIcon;
+    if (icon != null) {
+      final displayHeight = _shipIconDisplayHeightPx;
+      final displayWidth = displayHeight * icon.width / icon.height;
+      final anchorX = displayWidth * _shipIconAnchorXFrac;
+      final anchorY = displayHeight * _shipIconAnchorYFrac;
+      canvas.drawImageRect(
+        icon,
+        Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
+        Rect.fromLTWH(-anchorX, -anchorY, displayWidth, displayHeight),
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+    } else {
+      // Fallback while the icon asset is still decoding (loadUiImage is
+      // async) so the map isn't left blank for a frame or two.
+      final paint = Paint()..color = Colors.blue.shade400;
+      final border = Paint()
+        ..color = Colors.blue.shade900
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 1.5;
+      final path = Path()
+        ..moveTo(0, -8)
+        ..lineTo(7, 7)
+        ..lineTo(-7, 7)
+        ..close();
+      canvas.drawPath(path, paint);
+      canvas.drawPath(path, border);
+    }
     canvas.restore();
 
     // Ship name + distance-to-typhoon, stacked behind the ship (2026-08-xx
@@ -484,7 +525,7 @@ class MapPainter extends CustomPainter {
       textDirection: TextDirection.ltr,
     )..layout();
 
-    const gap = 12.0; // clearance from the ship icon (icon half-width ~7), unchanged value
+    const gap = 14.0; // clearance from the ship icon (icon anchored near the stern, ~5px half-width)
     const stackGap = 4.0; // clearance between the name and the distance box
     final nameDiagonal = math.sqrt(namePainter.width * namePainter.width + namePainter.height * namePainter.height);
     final nameDistance = gap + nameDiagonal / 2;
@@ -504,15 +545,15 @@ class MapPainter extends CustomPainter {
   // （名称）」のみ追従する").
   // 2026-08-03: icon + labels drawn inside translate+scale(1/zoom) blocks
   // (fixed-size request), same treatment as _drawShip.
+  // Typhoon icon: assets/typhoon_icon01.png, a square swirl graphic —
+  // anchored at its own center (2026-08-xx request), so unlike the ship
+  // icon no anchor-fraction offset is needed. Display size chosen close to
+  // the previous placeholder circle's diameter (20px, radius 10).
+  static const double _typhoonIconDisplaySizePx = 24.0;
+
   void _drawTyphoonMarker(Canvas canvas, TyphoonMarker typhoon) {
     final o = MapBounds.toOffset(typhoon.currentPosition.latitude, typhoon.currentPosition.longitude);
     _drawTyphoonRings(canvas, typhoon, o);
-
-    final paint = Paint()..color = Colors.red.shade400;
-    final border = Paint()
-      ..color = Colors.red.shade900
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 2;
 
     // Designation label ("11W (NOUL)") now sits behind the typhoon's
     // direction of travel (2026-08-xx request), same treatment as the ship
@@ -522,8 +563,26 @@ class MapPainter extends CustomPainter {
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
-    canvas.drawCircle(Offset.zero, 10, paint);
-    canvas.drawCircle(Offset.zero, 10, border);
+
+    final icon = typhoonIcon;
+    if (icon != null) {
+      const size = _typhoonIconDisplaySizePx;
+      canvas.drawImageRect(
+        icon,
+        Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
+        Rect.fromCenter(center: Offset.zero, width: size, height: size),
+        Paint()..filterQuality = FilterQuality.medium,
+      );
+    } else {
+      // Fallback while the icon asset is still decoding.
+      final paint = Paint()..color = Colors.red.shade400;
+      final border = Paint()
+        ..color = Colors.red.shade900
+        ..style = PaintingStyle.stroke
+        ..strokeWidth = 2;
+      canvas.drawCircle(Offset.zero, 10, paint);
+      canvas.drawCircle(Offset.zero, 10, border);
+    }
 
     const labelStyle = TextStyle(color: Colors.red, fontSize: 11, fontWeight: FontWeight.w600);
     final labelPainter = TextPainter(
@@ -650,6 +709,8 @@ class MapPainter extends CustomPainter {
         oldDelegate.shipLabel != shipLabel ||
         oldDelegate.showShip != showShip ||
         oldDelegate.zoom != zoom ||
+        oldDelegate.shipIcon != shipIcon ||
+        oldDelegate.typhoonIcon != typhoonIcon ||
         oldDelegate.typhoons.length != typhoons.length ||
         _typhoonsChanged(oldDelegate.typhoons);
   }
