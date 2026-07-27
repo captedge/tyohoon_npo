@@ -11,6 +11,7 @@
 
 ## 決定待ち・要確認事項
 
+- Windows機での実機確認が必要：登録情報の永続化（`flutter pub get`後、Passage Plan・台風情報・船名・Range Ring/再生速度を入力→アプリ再起動→前回内容が復元されるか）。詳細は`docs/completed-log.md`参照。
 - より高精細な海岸線データ（1:10m相当）への差し替え（優先度低、`docs/devlog-map-design.md`参照）
 - 航海計画編集画面の緯度経度入力は現在10進度（decimal degrees）。他画面の度分（deg-min）表記と揃えるかは今後ユーザーに確認
 - Passage Planの各エントリ名は現状CSVファイル名固定（拡張子除く）で、後から改名するUIは未実装。改名したい場合の要望があれば追加検討（`docs/devlog-passage-plan-multi.md`参照）

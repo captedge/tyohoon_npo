@@ -2,8 +2,11 @@ import 'dart:math' as math;
 import 'dart:ui';
 
 /// Fixed geographic display range for the whole app (decided 2026-07-26,
-/// see docs/devlog-map-design.md): Philippines, Taiwan, Korea, the China
-/// coast and all of Japan.
+/// see docs/devlog-map-design.md; longitude widened to E70-180 on
+/// 2026-07-25, then narrowed to E85-170 the same day per user preference,
+/// latitude unchanged throughout): Philippines, Taiwan, Korea, the China
+/// coast, all of Japan, plus the surrounding Southeast Asia / western
+/// Pacific area.
 ///
 /// Coordinates are projected with Web Mercator (the same projection used by
 /// Google Maps and most familiar web maps), not a plain equirectangular
@@ -17,12 +20,12 @@ import 'dart:ui';
 class MapBounds {
   static const double minLat = 5.0;
   static const double maxLat = 50.0;
-  static const double minLon = 115.0;
-  static const double maxLon = 150.0;
+  static const double minLon = 85.0;
+  static const double maxLon = 170.0;
 
   /// A point roughly at the center of Japan, used as the app's default
   /// starting view (2026-07-26 decision) instead of showing the full
-  /// N5-50/E115-150 range zoomed all the way out.
+  /// N5-50/E85-170 range zoomed all the way out.
   static const double defaultCenterLat = 30.0;
   static const double defaultCenterLon = 135.0;
 
@@ -67,7 +70,7 @@ class MapBounds {
   /// Inverse of [toOffset]: converts a point on [canvasSize] back to a
   /// lat/lon pair. Used for the cursor position readout (2026-07-27) — the
   /// result is not clamped to MapBounds, so callers over/under the visible
-  /// range will get lat/lon values slightly outside N5-50/E115-150.
+  /// range will get lat/lon values slightly outside N5-50/E85-170.
   static ({double lat, double lon}) fromOffset(Offset offset) {
     final lon = offset.dx / canvasWidth * (maxLon - minLon) + minLon;
     final mercatorY = _yTop - offset.dy / canvasHeight * (_yTop - _yBottom);

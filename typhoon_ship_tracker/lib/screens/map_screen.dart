@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import '../models/ship_waypoint.dart';
 import '../models/track_point.dart';
 import '../models/voyage_plan_entry.dart';
+import '../utils/app_state_storage.dart';
 import '../utils/coastline.dart';
 import '../utils/interpolation.dart';
 import '../utils/jtwc_parser.dart';
@@ -289,6 +290,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void initState() {
     super.initState();
+    _restoreState();
     CoastlineData.load().then((data) {
       if (mounted) setState(() => _coastline = data);
     });
@@ -313,6 +315,65 @@ class _MapScreenState extends State<MapScreen> {
     _transformationController.removeListener(_syncFromController);
     _transformationController.dispose();
     super.dispose();
+  }
+
+  // Restores registered Passage Plans / typhoon slots / ship name / playback
+  // speed from the previous session (2026-08-xx request: "アプリを閉じ、また
+  // 開いた場合に直前の入力済の登録情報が読み込まれるように"). Runs once at
+  // startup, async (SharedPreferences I/O), so the first frame(s) still show
+  // the empty/sample state until this resolves — same pattern already used
+  // for the coastline/icon loads just above. No-ops (leaves the sample/empty
+  // state as-is) on first launch or if the saved JSON can't be parsed — see
+  // AppStateStorage.load's doc comment.
+  Future<void> _restoreState() async {
+    final snapshot = await AppStateStorage.load();
+    if (snapshot == null || !mounted) return;
+    setState(() {
+      _shipName = snapshot.shipName;
+      _playbackSpeed = snapshot.playbackSpeed;
+      _voyagePlans
+        ..clear()
+        ..addAll(snapshot.voyagePlans);
+      for (var i = 0; i < _typhoonSlots.length && i < snapshot.typhoonSlots.length; i++) {
+        final saved = snapshot.typhoonSlots[i];
+        final slot = _typhoonSlots[i];
+        slot.pastedText = saved.pastedText;
+        slot.displayEnabled = saved.displayEnabled;
+        slot.ringsEnabled = saved.ringsEnabled;
+        slot.info = saved.pastedText.trim().isEmpty
+            ? JtwcTyphoonInfo.empty
+            : parseJtwcWarningText(saved.pastedText);
+      }
+      // Mirrors _showLabelSettingsDialog's Save handler: playback start time
+      // follows slot 0's warning, resolved against the *real* current date
+      // (not a stale value from whenever this was last saved) so a
+      // multi-day-old save doesn't drift the resolved year/month.
+      final restoredStart = _typhoonSlots[0].info.issuedAtJst(DateTime.now());
+      if (restoredStart != null) {
+        _startTime = restoredStart;
+        _offsetHours = 0;
+      }
+    });
+  }
+
+  // Fire-and-forget save after every mutation to the persisted fields
+  // (Passage Plan add/edit/delete/Display, typhoon paste/Display/Rings,
+  // ship name, playback speed) — see AppStateStorage.save's doc comment for
+  // why this doesn't need to be awaited by callers.
+  void _saveState() {
+    AppStateStorage.save(
+      shipName: _shipName,
+      playbackSpeed: _playbackSpeed,
+      voyagePlans: _voyagePlans,
+      typhoonSlots: [
+        for (final slot in _typhoonSlots)
+          TyphoonSlotSnapshot(
+            pastedText: slot.pastedText,
+            displayEnabled: slot.displayEnabled,
+            ringsEnabled: slot.ringsEnabled,
+          ),
+      ],
+    );
   }
 
   void _togglePlay() {
@@ -387,6 +448,7 @@ class _MapScreenState extends State<MapScreen> {
                 FilledButton(
                   onPressed: () {
                     setState(() => _playbackSpeed = speedLocal);
+                    _saveState();
                     Navigator.pop(dialogContext);
                   },
                   child: const Text('Save'),
@@ -759,6 +821,7 @@ class _MapScreenState extends State<MapScreen> {
                         _typhoonSlots[i].displayEnabled = typhoonDisplayLocal[i];
                       }
                     });
+                    _saveState();
                     Navigator.pop(dialogContext);
                   },
                   child: const Text('Save'),
@@ -839,6 +902,7 @@ class _MapScreenState extends State<MapScreen> {
         displayEnabled: true,
       ));
     });
+    _saveState();
   }
 
   Future<void> _editVoyagePlanEntry(int index) async {
@@ -857,6 +921,7 @@ class _MapScreenState extends State<MapScreen> {
       entry.waypoints = result.waypoints;
       entry.departureTime = result.departureTime;
     });
+    _saveState();
   }
 
   Future<void> _deleteVoyagePlanEntry(int index) async {
@@ -880,6 +945,7 @@ class _MapScreenState extends State<MapScreen> {
     );
     if (confirmed != true || !mounted) return;
     setState(() => _voyagePlans.removeAt(index));
+    _saveState();
   }
 
   void _showVoyagePlanError(String message) {
@@ -943,9 +1009,10 @@ class _MapScreenState extends State<MapScreen> {
                                     children: [
                                       Checkbox(
                                         value: entry.displayEnabled,
-                                        onChanged: (v) => setDialogState(
-                                          () => setState(() => entry.displayEnabled = v ?? true),
-                                        ),
+                                        onChanged: (v) => setDialogState(() {
+                                          setState(() => entry.displayEnabled = v ?? true);
+                                          _saveState();
+                                        }),
                                       ),
                                       Expanded(
                                         child: Text(
@@ -1006,6 +1073,7 @@ class _MapScreenState extends State<MapScreen> {
       final offset = MapBounds.toOffset(pos.latitude, pos.longitude);
       if ((offset - scenePosition).distance <= hitRadiusScene) {
         setState(() => slot.ringsEnabled = !slot.ringsEnabled);
+        _saveState();
         return;
       }
     }
@@ -1091,7 +1159,10 @@ class _MapScreenState extends State<MapScreen> {
           PopupMenuButton<int>(
             icon: const Icon(Icons.track_changes),
             tooltip: 'Range Ring',
-            onSelected: (i) => setState(() => _typhoonSlots[i].ringsEnabled = !_typhoonSlots[i].ringsEnabled),
+            onSelected: (i) {
+              setState(() => _typhoonSlots[i].ringsEnabled = !_typhoonSlots[i].ringsEnabled);
+              _saveState();
+            },
             itemBuilder: (context) {
               final entries = <PopupMenuEntry<int>>[
                 for (var i = 0; i < _typhoonSlots.length; i++)

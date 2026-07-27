@@ -22,6 +22,7 @@
 5. **エミュレータのHome/Back操作はcomputer-useから効かない**。ホーム画面ウィジェット等「ランチャーのホーム画面に置く」検証は、ユーザーが実機に`build_apk.bat`等でインストールして確認する。
 6. **Windowsデスクトップ向け（`flutter run -d windows`）には Visual Studio の「C++によるデスクトップ開発」ワークロードが別途必要**（2026-07-26確認、`typhoon_ship_tracker`プロジェクトで発覚）。未インストールだと`Error: Unable to find suitable Visual Studio toolchain.`で失敗する。Visual Studio Installerから「Desktop development with C++」を追加インストールし、`flutter doctor`で緑チェックになることを確認してから再実行する。Android向け（エミュレータ/実機）のみが目的の場合はこのワークロードは不要。
 7. **`flutter create`で生成した`windows/`配下のファイルは、コミットのたびに改行コード（LF/CRLF）だけの差分（`M`表示）が出ることがある**（2026-07-26確認、Gitの`core.autocrlf`変換とCoworkサンドボックス側のLF書き込みの相性による）。内容は変わっていないため実害はない。気になる場合はユーザー側で`.gitattributes`を用意して改行コードを固定する対応があるが、優先度は低い。
+8. **ネイティブコードを含むプラグイン（例：`file_picker`）を`pubspec.yaml`に追加すると、Windows Developer Modeが未有効の場合`Error: Building with plugins requires symlink support.`で`flutter run -d windows`が失敗する**（2026-07-30確認、`file_picker`追加時に発覚。それまでは`cupertino_icons`のみでDartのみのプラグインだったため発生していなかった）。対処：PowerShellで`start ms-settings:developers`を実行して設定画面を開き、「開発者モード」をオンにする（管理者権限が必要な場合あり）。オンにした後は`flutter run -d windows`を再実行するだけでよく、PC再起動は基本的に不要。
 
 ## このWindows機・Cowork運用での一般的な注意（Flutter固有ではないが同じ組み合わせで毎回発生する）
 
