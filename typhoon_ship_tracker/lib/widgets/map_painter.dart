@@ -97,17 +97,28 @@ class ShipTyphoonDistance {
 /// Modeled after [TyphoonMarker]: [route] is the whole track (past+future,
 /// for the waypoint dots), split into [pastRoute] (solid) / [futureRoute]
 /// (dotted) at the current slider time, sharing the interpolated
-/// [position] as their boundary. [label] is the plan's name (or the
-/// user-entered "Ship's Name" for the sample/fallback track) — since
-/// multiple routes can be on screen at once, each needs its own label rather
-/// than one shared "Ship" caption. [typhoonDistances] is this ship's own
-/// distance to *every* currently-displayed typhoon marker at the current
-/// time (2026-07-28: previously a single `distanceToTyphoonNm` measuring only
-/// to the "primary" typhoon — extended to one entry per displayed typhoon,
-/// each colored to match its source, once JTWC/JMA could both be shown at
-/// once per slot) — empty when there's no typhoon to compare against.
-/// Computed independently per ship so each route's distance readouts are its
-/// own, not shared.
+/// [position] as their boundary. [label] is the user-entered "Ship's Name"
+/// (Information dialog) — the *same* text on every [ShipMarker], since these
+/// represent route *options* for one physical ship, not separate vessels
+/// (2026-08-xx revision: this used to carry the Passage Plan's own name, but
+/// that moved to a dedicated on-screen legend — see map_screen.dart's
+/// Passage Plan legend overlay — so routes are told apart by [color] alone
+/// there, freeing this label to show the ship's actual name instead). Empty
+/// when the user hasn't entered a name, in which case the painter simply
+/// skips drawing it (no empty box reserving space behind the ship).
+/// [typhoonDistances] is this ship's own distance to every currently-
+/// displayed typhoon marker at the current time, *grouped by typhoon slot*
+/// (2026-07-29 revision: previously a flat `List<ShipTyphoonDistance>` drawn
+/// one after another, further and further behind the ship — including JTWC
+/// and JMA of the *same* typhoon, which read oddly as two separate stops
+/// instead of a pair. Now one inner list per slot — 1 entry when only one
+/// source is displayed for that typhoon, 2 when both JTWC and JMA are —
+/// see map_screen.dart's `_typhoonMarkerGroups`/`_buildShipMarkers`. The
+/// painter draws each group's entries stacked vertically at one shared
+/// distance behind the ship, then moves on to the *next slot's* group
+/// further out — see [MapPainter._drawShip]). Outer list empty when there's
+/// no typhoon to compare against; computed independently per ship so each
+/// route's distance readouts are its own, not shared.
 class ShipMarker {
   final LatLng position;
   final List<LatLng> route;
@@ -115,7 +126,7 @@ class ShipMarker {
   final List<LatLng> futureRoute;
   final LatLng? nextWaypoint;
   final String label;
-  final List<ShipTyphoonDistance> typhoonDistances;
+  final List<List<ShipTyphoonDistance>> typhoonDistances;
 
   /// Per-route color (2026-08-xx request: comparing multiple routes from the
   /// same departure port/time made them hard to tell apart when all drawn
@@ -474,7 +485,22 @@ class MapPainter extends CustomPainter {
   // glance — filling the whole box in the source color reads much more
   // clearly, and a plain black outline keeps the box legible against both
   // the sea/land background and the similarly-colored track line).
-  void _drawDistanceLabel(Canvas canvas, Offset behind, double startDistance, double distanceNm, Color color) {
+  // [extraOffset] (2026-07-29 addition) is added on top of the usual
+  // behind-axis placement, in the same local (unrotated — see _drawShip,
+  // which only translates+scales this space, never rotates it) coordinate
+  // space — used by _drawShip to nudge a box straight up/down off the
+  // behind-axis centerline when pairing JTWC/JMA of one typhoon slot as a
+  // vertically-stacked pair sharing a single `startDistance` (see
+  // ShipMarker.typhoonDistances's doc comment) instead of trailing one
+  // after another.
+  void _drawDistanceLabel(
+    Canvas canvas,
+    Offset behind,
+    double startDistance,
+    double distanceNm,
+    Color color, {
+    Offset extraOffset = Offset.zero,
+  }) {
     const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
     final painter = TextPainter(
       text: TextSpan(text: '${distanceNm.round()} nm', style: style),
@@ -486,7 +512,7 @@ class MapPainter extends CustomPainter {
     final boxWidth = painter.width + paddingH * 2;
     final boxHeight = painter.height + paddingV * 2;
     final diagonal = math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight);
-    final localCenter = behind * (startDistance + diagonal / 2);
+    final localCenter = behind * (startDistance + diagonal / 2) + extraOffset;
 
     final rect = Rect.fromCenter(center: localCenter, width: boxWidth, height: boxHeight);
     final rrect = RRect.fromRectAndRadius(rect, const Radius.circular(4));
@@ -517,6 +543,20 @@ class MapPainter extends CustomPainter {
     final boxHeight = painter.height + paddingV * 2;
     final diagonal = math.sqrt(boxWidth * boxWidth + boxHeight * boxHeight);
     return startDistance + diagonal;
+  }
+
+  /// A [_drawDistanceLabel] box's on-screen height (2026-07-29 addition) —
+  /// constant regardless of the distance value's digit count, since only the
+  /// text's *width* changes with more digits, not a single line's height.
+  /// Used by [_drawShip] to work out how far apart to nudge a vertically-
+  /// stacked JTWC/JMA pair so the two boxes don't overlap.
+  double _distanceLabelBoxHeight() {
+    final painter = TextPainter(
+      text: const TextSpan(text: '0 nm', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+      textDirection: TextDirection.ltr,
+    )..layout();
+    const paddingV = 3.0;
+    return painter.height + paddingV * 2;
   }
 
   // Unit vector pointing opposite a ship's heading toward its next waypoint —
@@ -656,39 +696,78 @@ class MapPainter extends CustomPainter {
     }
     canvas.restore();
 
-    // Ship name + one distance-to-typhoon box per currently-displayed
-    // typhoon, all stacked behind the ship (2026-08-xx request: labels used
-    // to sit fixed to the right of the icon; now they follow the "behind"
-    // direction — opposite of the heading toward the next waypoint — so they
-    // read naturally regardless of which way the ship is heading). Stacked
-    // with the name innermost (closest to the ship) and distance boxes
-    // outermost, each one further out than the last (2026-07-28: extended
-    // from a single distance box to one per [ShipMarker.typhoonDistances]
-    // entry, since a ship can now show its distance to several
-    // simultaneously-displayed typhoons — e.g. JTWC and JMA for the same
-    // slot). Font size/weight/color for the name are unchanged from before.
+    // Ship name (if entered) + one distance-to-typhoon group per currently-
+    // displayed typhoon *slot*, all stacked behind the ship (2026-08-xx
+    // request: labels used to sit fixed to the right of the icon; now they
+    // follow the "behind" direction — opposite of the heading toward the
+    // next waypoint — so they read naturally regardless of which way the
+    // ship is heading). Stacked with the name innermost (closest to the
+    // ship) and each typhoon slot's group further out than the last (2026-
+    // 07-28: extended from a single distance box to one per displayed
+    // typhoon; 2026-07-29: regrouped by slot — see ShipMarker.typhoonDistances'
+    // doc comment — so JTWC/JMA of the *same* typhoon sit at one shared
+    // distance behind the ship as a vertically-stacked pair, rather than
+    // each pushing the next one further back). Font size/weight/color for
+    // the name are unchanged from before.
     final behind = _shipBehindDirection(ship, o);
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
 
-    const nameStyle = TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600);
-    final namePainter = TextPainter(
-      text: TextSpan(text: ship.label, style: nameStyle),
-      textDirection: TextDirection.ltr,
-    )..layout();
+    // Clearance from the ship icon to the first stacked item, and between
+    // each subsequent item (2026-08-xx: tightened from 14.0/4.0 — the
+    // previous values read as "too spread out" once the name label sits
+    // right above the distance box(es), per user feedback).
+    const gap = 8.0;
+    const stackGap = 2.0;
 
-    const gap = 14.0; // clearance from the ship icon (icon anchored near the stern, ~5px half-width)
-    const stackGap = 4.0; // clearance between stacked labels/boxes
-    final nameDiagonal = math.sqrt(namePainter.width * namePainter.width + namePainter.height * namePainter.height);
-    final nameDistance = gap + nameDiagonal / 2;
-    final nameCenter = behind * nameDistance;
-    namePainter.paint(canvas, nameCenter - Offset(namePainter.width / 2, namePainter.height / 2));
+    var nextStart = gap;
+    final name = ship.label.trim();
+    if (name.isNotEmpty) {
+      const nameStyle = TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600);
+      final namePainter = TextPainter(
+        text: TextSpan(text: name, style: nameStyle),
+        textDirection: TextDirection.ltr,
+      )..layout();
+      final nameDiagonal = math.sqrt(namePainter.width * namePainter.width + namePainter.height * namePainter.height);
+      final nameDistance = nextStart + nameDiagonal / 2;
+      final nameCenter = behind * nameDistance;
+      namePainter.paint(canvas, nameCenter - Offset(namePainter.width / 2, namePainter.height / 2));
+      nextStart = nameDistance + nameDiagonal / 2 + stackGap;
+    }
 
-    var nextStart = nameDistance + nameDiagonal / 2 + stackGap;
-    for (final entry in ship.typhoonDistances) {
-      _drawDistanceLabel(canvas, behind, nextStart, entry.distanceNm, entry.color);
-      nextStart = _distanceLabelExtent(nextStart, entry.distanceNm) + stackGap;
+    // Vertical gap between the two boxes of a JTWC+JMA pair (2026-07-29
+    // addition) — small and fixed, in the same "screen pixel" units as
+    // everything else in this translate+scale(1/zoom) block.
+    const groupVerticalGap = 2.0;
+
+    for (final group in ship.typhoonDistances) {
+      if (group.isEmpty) continue;
+      if (group.length == 1) {
+        // Only one source displayed for this typhoon slot — same single-box
+        // placement as before.
+        _drawDistanceLabel(canvas, behind, nextStart, group.first.distanceNm, group.first.color);
+        nextStart = _distanceLabelExtent(nextStart, group.first.distanceNm) + stackGap;
+      } else {
+        // Both JTWC and JMA displayed for this slot (2026-07-29 request:
+        // "台風１→船の後方にJTWC/JMAを縦に並べる") — both boxes sit at the
+        // *same* distance behind the ship, offset up/down instead of one
+        // trailing further back than the other. "Vertically" here is a
+        // literal screen-space up/down offset, not rotated to the ship's
+        // heading — this whole block (see _drawShip's canvas.save above)
+        // only translates+scales, it never rotates, so straight Offset(0, ±)
+        // is already what "vertical" means on screen at this point.
+        final halfSpan = _distanceLabelBoxHeight() / 2 + groupVerticalGap / 2;
+        _drawDistanceLabel(canvas, behind, nextStart, group[0].distanceNm, group[0].color,
+            extraOffset: Offset(0, -halfSpan));
+        _drawDistanceLabel(canvas, behind, nextStart, group[1].distanceNm, group[1].color,
+            extraOffset: Offset(0, halfSpan));
+        // Advance past whichever of the pair reaches furthest along the
+        // behind axis (their widths can differ slightly by digit count).
+        final extent0 = _distanceLabelExtent(nextStart, group[0].distanceNm);
+        final extent1 = _distanceLabelExtent(nextStart, group[1].distanceNm);
+        nextStart = math.max(extent0, extent1) + stackGap;
+      }
     }
     canvas.restore();
   }
@@ -888,9 +967,19 @@ class MapPainter extends CustomPainter {
     return false;
   }
 
-  bool _typhoonDistancesChanged(List<ShipTyphoonDistance> old, List<ShipTyphoonDistance> current) {
+  // 2026-07-29: typhoonDistances is now grouped by slot (List<List<...>>,
+  // see ShipMarker.typhoonDistances' doc comment) — compares group-by-group,
+  // then entry-by-entry within each group.
+  bool _typhoonDistancesChanged(List<List<ShipTyphoonDistance>> old, List<List<ShipTyphoonDistance>> current) {
     for (var i = 0; i < current.length && i < old.length; i++) {
-      if (old[i].distanceNm != current[i].distanceNm || old[i].color != current[i].color) return true;
+      final oldGroup = old[i];
+      final currentGroup = current[i];
+      if (oldGroup.length != currentGroup.length) return true;
+      for (var j = 0; j < currentGroup.length; j++) {
+        if (oldGroup[j].distanceNm != currentGroup[j].distanceNm || oldGroup[j].color != currentGroup[j].color) {
+          return true;
+        }
+      }
     }
     return false;
   }

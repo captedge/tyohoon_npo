@@ -201,10 +201,13 @@ class _MapScreenState extends State<MapScreen> {
 
   // User-entered ship name (2026-07-28 request: NAVTOR-format voyage-plan
   // CSVs don't carry a ship name field, so it's entered here instead).
-  // Currently unused for display (2026-07-27 decision: the sample/fallback
-  // ship track that used to show this as its label was removed — see
-  // docs/completed-log.md) — kept in the Information dialog and persisted
-  // in case a future use for it comes up; not read anywhere else right now.
+  // Drawn behind every displayed ship marker (2026-08-xx: previously unused
+  // for display — the Passage Plan's own name was shown there instead, but
+  // that moved to the dedicated legend overlay below, freeing this slot for
+  // the ship's actual name). The same text is used for every currently
+  // Display-on Passage Plan, since they represent route *options* for one
+  // physical ship, not separate vessels — see ShipMarker.label's doc comment
+  // in map_painter.dart.
   String _shipName = '';
 
   // Up to 3 typhoons (2026-07-28 request: "this area can have more than one
@@ -294,20 +297,32 @@ class _MapScreenState extends State<MapScreen> {
     );
   }
 
-  // Builds the actual [TyphoonMarker]s to draw: up to two per slot (2026-
-  // 07-28 request — JTWC and JMA shown simultaneously, each independently
-  // Display-toggleable), each colored by source (see _jtwcColor/_jmaColor).
+  // Builds the actual [TyphoonMarker]s to draw, grouped by slot: each inner
+  // list holds up to two entries (2026-07-28 request — JTWC and JMA shown
+  // simultaneously, each independently Display-toggleable), JTWC first then
+  // JMA when both are present, matching _jtwcColor/_jmaColor. Slots with
+  // nothing currently displayed simply contribute no entry (not an empty
+  // list) — see _typhoonMarkers below for the flat form most callers want.
+  //
+  // 2026-07-29: this grouping is what lets _buildShipMarkers show a ship's
+  // distance to JTWC/JMA of the *same* typhoon as a vertically-stacked pair
+  // rather than two separate stops further and further behind the ship (see
+  // ShipMarker.typhoonDistances) — a flat list alone can't tell two
+  // consecutive entries "belong to the same slot" from "happen to be
+  // adjacent because the slot in between had nothing displayed".
+  //
   // The slider-time interpolation and "whole track drawn persistently"
   // behavior mirror the ship's (positionAt / full-route rendering) —
   // 2026-07-28 request: "台風の軌跡：船のように残してください".
-  List<TyphoonMarker> get _typhoonMarkers {
-    final markers = <TyphoonMarker>[];
+  List<List<TyphoonMarker>> get _typhoonMarkerGroups {
+    final groups = <List<TyphoonMarker>>[];
     for (var i = 0; i < _typhoonSlots.length; i++) {
       final slot = _typhoonSlots[i];
+      final slotMarkers = <TyphoonMarker>[];
       if (slot.jtwcDisplayEnabled) {
         final points = _jtwcTrackPointsForSlot(i);
         if (points != null && points.isNotEmpty) {
-          markers.add(_typhoonMarkerFromTrack(
+          slotMarkers.add(_typhoonMarkerFromTrack(
             points,
             designation: _jtwcMarkerLabel(slot),
             pressureLabel:
@@ -320,7 +335,7 @@ class _MapScreenState extends State<MapScreen> {
       if (slot.jmaDisplayEnabled) {
         final points = _jmaTrackPointsForSlot(i);
         if (points != null && points.isNotEmpty) {
-          markers.add(_typhoonMarkerFromTrack(
+          slotMarkers.add(_typhoonMarkerFromTrack(
             points,
             designation: _jmaMarkerLabel(slot),
             pressureLabel:
@@ -330,9 +345,15 @@ class _MapScreenState extends State<MapScreen> {
           ));
         }
       }
+      if (slotMarkers.isNotEmpty) groups.add(slotMarkers);
     }
-    return markers;
+    return groups;
   }
+
+  // Flat form of [_typhoonMarkerGroups] — what every other caller (the map's
+  // own typhoon track/marker drawing, the Range Ring menu, etc.) actually
+  // wants; only _buildShipMarkers needs the grouped form.
+  List<TyphoonMarker> get _typhoonMarkers => [for (final group in _typhoonMarkerGroups) ...group];
 
   // Lat/lon under the mouse cursor, shown bottom-right (2026-07-27 request).
   // Null when the cursor isn't over the map (or on touch-only devices,
@@ -1008,9 +1029,42 @@ class _MapScreenState extends State<MapScreen> {
                     final newStartTime = slot0Jma.isEmpty
                         ? parsedJtwc[0]?.issuedAtJst(DateTime.now())
                         : (slot0Jma.observedAtJst ?? slot0Jma.reportDateTimeJst);
+                    // Which source actually anchored playback *before* this
+                    // Save — JMA if slot 0 already had JMA data, else JTWC
+                    // (same priority rule as newStartTime's own ternary
+                    // above). Whether that source's own raw input changed in
+                    // this Save — not whether the *resolved* newStartTime
+                    // differs from the current _startTime — is what should
+                    // decide whether to reset (2026-07-29 second bug report:
+                    // comparing resolved values, as a first attempt at this
+                    // fix did, still reset when JMA was fetched for the
+                    // *first time* alongside an already-running JTWC track —
+                    // switching which source resolves newStartTime naturally
+                    // produces a different value even though nothing the
+                    // user considers "the anchor" changed. JmaTyphoonInfo has
+                    // no value equality, so comparing jmaFetched[0] against
+                    // the slot's stored jmaInfo by reference works out
+                    // correctly anyway: they're literally the same object
+                    // unless a fetch reassigned jmaFetched[0] in this dialog
+                    // session — see jmaFetched's own initialization below).
+                    final previousJma = _typhoonSlots[0].jmaInfo;
+                    final anchorSourceChanged = previousJma.isEmpty
+                        ? typhoonControllers[0].text != _typhoonSlots[0].pastedText // JTWC was anchoring
+                        : !identical(slot0Jma, previousJma); // JMA was already anchoring
                     setState(() {
                       _shipName = shipController.text;
-                      if (newStartTime != null) {
+                      // 2026-07-29 bug fix: this used to reset to 0 whenever
+                      // `newStartTime != null` — true on *every* Save as
+                      // long as slot 0 has JTWC text pasted and/or JMA
+                      // fetched — even when Save was only pressed to toggle
+                      // a Display checkbox, or to add a second source
+                      // alongside one that was already anchoring playback,
+                      // with nothing about *that* anchoring source's own
+                      // input changed. Now only resets when the source that
+                      // actually determines newStartTime has itself changed
+                      // (edited/new JTWC text, or a fresh JMA fetch) — see
+                      // anchorSourceChanged above.
+                      if (newStartTime != null && anchorSourceChanged) {
                         _startTime = newStartTime;
                         // Slider position 0 = _startTime itself, so "start
                         // of playback" actually lands on the announced time
@@ -1745,15 +1799,29 @@ class _MapScreenState extends State<MapScreen> {
 
   // Builds the actual [ShipMarker]s to draw: one per currently-active track
   // (see _activeShipTracks), each with its own interpolated position,
-  // past/future split, next-waypoint heading, route color, and — one entry
-  // per currently-displayed typhoon marker (2026-07-28: previously only
-  // measured to the single "primary" typhoon; now that JTWC/JMA can both be
-  // on screen at once per slot, each ship shows its distance to *every*
-  // displayed typhoon, each tagged with that typhoon's own color — see
-  // ShipTyphoonDistance/map_painter.dart — rather than one shared value).
-  List<ShipMarker> _buildShipMarkers(List<TyphoonMarker> typhoons) {
+  // past/future split, next-waypoint heading, route color, and — one group
+  // per currently-displayed typhoon *slot* (2026-07-29: previously a flat
+  // per-typhoon-marker list that trailed further and further behind the
+  // ship; now grouped by slot — see [_typhoonMarkerGroups] — so JTWC/JMA of
+  // the *same* typhoon draw as a vertically-stacked pair at one shared
+  // distance behind the ship instead of two separate stops, while Typhoon
+  // 1/2/3 each still get their own, progressively-further-back position —
+  // see ShipMarker.typhoonDistances/map_painter.dart's grouped stacking).
+  //
+  // [tracks] is passed in (rather than re-reading _activeShipTracks here)
+  // so the caller (build()) can compute it once and share it with the
+  // Passage Plan legend overlay, which needs the same plan-name/color
+  // pairing to stay in sync with what's actually drawn on the map.
+  //
+  // 2026-08-xx: `label` is now the user-entered Ship's Name (_shipName),
+  // the same on every marker (one physical ship, multiple route options) —
+  // the plan's own name (`entry.label`) moved to the legend overlay instead
+  // of being drawn next to the ship on the map, see ShipMarker's doc comment.
+  List<ShipMarker> _buildShipMarkers(
+    List<List<TyphoonMarker>> typhoonGroups,
+    List<({List<TrackPoint> track, String label})> tracks,
+  ) {
     final markers = <ShipMarker>[];
-    final tracks = _activeShipTracks;
     for (var i = 0; i < tracks.length; i++) {
       final entry = tracks[i];
       final track = entry.track;
@@ -1766,13 +1834,16 @@ class _MapScreenState extends State<MapScreen> {
         pastRoute: split.past,
         futureRoute: split.future,
         nextWaypoint: next == null ? null : LatLng(next.latitude, next.longitude),
-        label: entry.label,
+        label: _shipName,
         typhoonDistances: [
-          for (final typhoon in typhoons)
-            ShipTyphoonDistance(
-              distanceNm: distanceNm(position, typhoon.currentPosition),
-              color: typhoon.color,
-            ),
+          for (final group in typhoonGroups)
+            [
+              for (final typhoon in group)
+                ShipTyphoonDistance(
+                  distanceNm: distanceNm(position, typhoon.currentPosition),
+                  color: typhoon.color,
+                ),
+            ],
         ],
         color: _shipColors[i % _shipColors.length],
       ));
@@ -1780,10 +1851,85 @@ class _MapScreenState extends State<MapScreen> {
     return markers;
   }
 
+  // Passage Plan legend overlay (2026-08-xx request: the plan-name label that
+  // used to sit next to each ship on the map is "not needed" there anymore —
+  // instead, show one legend box, fixed to the top-left of the *screen* (not
+  // the zoomable map canvas — it's a plain widget in the Stack, outside
+  // InteractiveViewer, so it's already a constant on-screen size regardless
+  // of zoom without any extra work), listing every currently Display-on
+  // plan's name in its route's own color next to a matching color swatch.
+  // The box's height grows automatically (Column with MainAxisSize.min) as
+  // more plans are added. Colored to match [_shipColors] by position in
+  // [tracks] — the same list/order/index _buildShipMarkers uses for its own
+  // color assignment, so a legend row always matches the route it labels.
+  // Null (nothing to show) when there are no Display-on plans, same as the
+  // rest of this screen's "don't show empty chrome" pattern.
+  Widget? _buildPassagePlanLegend(List<({List<TrackPoint> track, String label})> tracks) {
+    if (tracks.isEmpty) return null;
+    return Positioned(
+      // 2026-07-29 adjustment: nudged right/down from the initial (12, 12)
+      // — at (12, 12) this box could overlap the lon/lat grid-line labels
+      // (_buildGridLabelOverlay), which sit right at the top edge (top:
+      // margin=4) and can appear anywhere along the left edge too (lat
+      // labels are pinned to left:margin=4 at whatever screen Y their grid
+      // line falls at, so a label can land anywhere vertically, not just
+      // near the top). 40/48 clears both: below the top-edge lon label row,
+      // and past the widest lat label chip's width.
+      left: 48,
+      top: 40,
+      child: IgnorePointer(
+        child: Container(
+          constraints: const BoxConstraints(maxWidth: 240),
+          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+          decoration: BoxDecoration(
+            color: Colors.white,
+            border: Border.all(color: const Color(0xFF0D2436), width: 2),
+            borderRadius: BorderRadius.circular(4),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.stretch,
+            children: [
+              const Text(
+                'Passage Plan',
+                textAlign: TextAlign.center,
+                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 8),
+              for (var i = 0; i < tracks.length; i++) ...[
+                if (i > 0) const SizedBox(height: 6),
+                Row(
+                  children: [
+                    Expanded(
+                      child: Text(
+                        tracks[i].label,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600,
+                          color: _shipColors[i % _shipColors.length],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 10),
+                    Container(width: 36, height: 3, color: _shipColors[i % _shipColors.length]),
+                  ],
+                ),
+              ],
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final typhoons = _typhoonMarkers;
-    final ships = _buildShipMarkers(typhoons);
+    final typhoonGroups = _typhoonMarkerGroups;
+    final typhoons = [for (final group in typhoonGroups) ...group];
+    final activeTracks = _activeShipTracks;
+    final ships = _buildShipMarkers(typhoonGroups, activeTracks);
+    final passagePlanLegend = _buildPassagePlanLegend(activeTracks);
     // Whole playback bar (not just the timeline track inside it) is hidden
     // when there's nothing to scrub through — i.e. no Passage Plan and no
     // typhoon info registered (2026-07-27 request: since the sample ship/
@@ -1920,6 +2066,7 @@ class _MapScreenState extends State<MapScreen> {
                   ),
                 ),
                 Positioned.fill(child: _buildGridLabelOverlay()),
+                if (passagePlanLegend != null) passagePlanLegend,
                 Positioned(
                   right: 12,
                   top: 12,
