@@ -16,6 +16,7 @@ import '../utils/csv_library.dart';
 import '../utils/interpolation.dart';
 import '../utils/jma_feed_fetcher.dart';
 import '../utils/jma_xml_parser.dart';
+import '../utils/jtwc_feed_fetcher.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
 import '../utils/marker_icons.dart';
@@ -418,17 +419,40 @@ class _MapScreenState extends State<MapScreen> {
         slot.jtwcInfo = saved.pastedText.trim().isEmpty
             ? JtwcTyphoonInfo.empty
             : parseJtwcWarningText(saved.pastedText);
-        // JMA fetches (and their rings toggle) are session-only and never
-        // persisted (see _TyphoonSlot.jmaInfo doc comment) —
-        // slot.jmaInfo/jmaDisplayEnabled/jmaRingsEnabled are left at their
-        // fresh-construction defaults here.
+        // JMA offline cache (2026-07-29 addition): re-parse the stored raw
+        // bulletin XML the same way jtwcInfo is re-parsed from stored raw
+        // text above. Falls back to JmaTyphoonInfo.empty on a parse failure
+        // (e.g. a hypothetical future JMA schema change making an
+        // already-cached bulletin no longer parse) rather than crashing on
+        // launch — same fail-safe philosophy as AppStateStorage.load's own
+        // outer catch, see its doc comment.
+        final rawXml = saved.jmaRawXml;
+        slot.jmaRawXml = rawXml;
+        slot.jmaFetchedAtJst = saved.jmaFetchedAtJst;
+        slot.jmaDisplayEnabled = saved.jmaDisplayEnabled;
+        slot.jmaRingsEnabled = saved.jmaRingsEnabled;
+        if (rawXml == null || rawXml.trim().isEmpty) {
+          slot.jmaInfo = JmaTyphoonInfo.empty;
+        } else {
+          try {
+            slot.jmaInfo = parseJmaTyphoonXml(rawXml);
+          } on JmaXmlParseException {
+            slot.jmaInfo = JmaTyphoonInfo.empty;
+          }
+        }
       }
       // Mirrors _showLabelSettingsDialog's Save handler: playback start time
       // follows slot 0's warning, resolved against the *real* current date
       // (not a stale value from whenever this was last saved) so a
-      // multi-day-old save doesn't drift the resolved year/month. Only the
-      // JTWC source is considered here since JMA isn't restored (see above).
-      final restoredStart = _typhoonSlots[0].jtwcInfo.issuedAtJst(DateTime.now());
+      // multi-day-old save doesn't drift the resolved year/month. Same
+      // JMA-first priority as the Save handler (2026-07-29: JMA can now be
+      // restored too, see above) — a cached JMA bulletin's own exact JST
+      // time is more precise than reconstructing one from JTWC's
+      // day-only field, when both are available.
+      final restoredSlot0Jma = _typhoonSlots[0].jmaInfo;
+      final restoredStart = restoredSlot0Jma.isEmpty
+          ? _typhoonSlots[0].jtwcInfo.issuedAtJst(DateTime.now())
+          : (restoredSlot0Jma.observedAtJst ?? restoredSlot0Jma.reportDateTimeJst);
       if (restoredStart != null) {
         _startTime = restoredStart;
         _offsetHours = 0;
@@ -451,6 +475,10 @@ class _MapScreenState extends State<MapScreen> {
             pastedText: slot.pastedText,
             jtwcDisplayEnabled: slot.jtwcDisplayEnabled,
             jtwcRingsEnabled: slot.jtwcRingsEnabled,
+            jmaRawXml: slot.jmaRawXml,
+            jmaFetchedAtJst: slot.jmaFetchedAtJst,
+            jmaDisplayEnabled: slot.jmaDisplayEnabled,
+            jmaRingsEnabled: slot.jmaRingsEnabled,
           ),
       ],
     );
@@ -666,6 +694,17 @@ class _MapScreenState extends State<MapScreen> {
     return '$dd $mmm. ${dt.year} $hh:$mi (JST)';
   }
 
+  // "Import All" success status text (2026-07-29 request), e.g. "Imported
+  // to Typhoon 1", "Imported to Typhoon 1, 2", "Imported to Typhoon 1, 2,
+  // 3" for count == 1/2/3 — fetchAllJma/fetchAllJtwc below always fill
+  // slots contiguously starting at Typhoon 1 (see their own loops), so
+  // "how many were imported" fully determines which slot numbers to list
+  // here without needing to track which specific slots separately.
+  String _importedToSlotsLabel(int count) {
+    final numbers = List.generate(count, (i) => '${i + 1}').join(', ');
+    return 'Imported to Typhoon $numbers';
+  }
+
   // Cursor lat/lon readout (2026-07-27 request), formatted as
   // "31-15.5N 140-23.4E": degrees, a dash, minutes with one decimal place
   // (seconds folded into tenths of a minute — e.g. 15' 30" = 15.5'), then
@@ -766,21 +805,60 @@ class _MapScreenState extends State<MapScreen> {
     final jtwcDisplayLocal = [for (final slot in _typhoonSlots) slot.jtwcDisplayEnabled];
     final parseErrors = List<String?>.filled(_typhoonSlots.length, null);
 
-    // JMA auto-fetch state (2026-07-28 addition, per-slot): "Fetch from JMA"
-    // downloads+parses the latest VPTW60 bulletin (see jma_feed_fetcher.dart)
+    // JMA auto-fetch state (2026-07-28 addition, per-slot): "Import from
+    // JMA" (UI label; 2026-07-29 renamed from "Fetch from JMA" per user
+    // request — see below) downloads+parses the latest VPTW60 bulletin
+    // (see jma_feed_fetcher.dart)
     // into jmaFetched[i] — kept as the raw [JmaTyphoonInfo] (2026-07-28
     // redesign: "気象庁と米軍の予報を両方表示" — JTWC and JMA are now two
     // independent, simultaneously-displayable sources per slot rather than
     // one overriding the other, so there's no more reason to convert into
     // JtwcTyphoonInfo's shape at fetch time). Seeded from whatever's already
     // in `_typhoonSlots[i].jmaInfo` (a previous fetch from earlier in this
-    // session, if any) so reopening this dialog shows the current state
-    // rather than looking freshly empty. Session-only, same as before — see
-    // _TyphoonSlot.jmaInfo's doc comment for why this isn't persisted.
+    // session, or one restored from the offline cache at launch — see
+    // _TyphoonSlot.jmaRawXml — if any) so reopening this dialog shows the
+    // current state rather than looking freshly empty.
     final jmaFetched = List<JmaTyphoonInfo>.generate(_typhoonSlots.length, (i) => _typhoonSlots[i].jmaInfo);
+    // Raw XML + fetch timestamp behind jmaFetched above (2026-07-29 offline
+    // cache addition) — kept as parallel local arrays for the same reason
+    // jmaFetched itself is: dialog-local "draft" state, only written back
+    // into _typhoonSlots on Save, seeded from whatever's already cached so
+    // reopening this dialog doesn't look like the cache was lost.
+    final jmaRawXmlLocal = [for (final slot in _typhoonSlots) slot.jmaRawXml];
+    final jmaFetchedAtLocal = [for (final slot in _typhoonSlots) slot.jmaFetchedAtJst];
     final jmaDisplayLocal = [for (final slot in _typhoonSlots) slot.jmaDisplayEnabled];
     final jmaFetching = List<bool>.filled(_typhoonSlots.length, false);
     final jmaFetchError = List<String?>.filled(_typhoonSlots.length, null);
+
+    // JTWC auto-fetch state (2026-07-29 addition, per-slot): "Import from
+    // JTWC" downloads the region's current TC Warning Text (see
+    // jtwc_feed_fetcher.dart) and, on success, writes it straight into
+    // `typhoonControllers[i]` — the *same* text box a manual paste already
+    // fills. Unlike the JMA source above, there's no separate parsed/raw
+    // state to track here: JTWC only ever has the one representation
+    // (pasted-or-fetched text, parsed at Save time same as always), so
+    // reusing the existing text box means fetch results already get every
+    // bit of existing behavior — persistence, re-parsing, Display toggle —
+    // for free, with no new AppStateStorage fields needed.
+    final jtwcFetching = List<bool>.filled(_typhoonSlots.length, false);
+    final jtwcFetchError = List<String?>.filled(_typhoonSlots.length, null);
+
+    // "Import All" state (2026-07-29 addition): unlike the per-slot fetch
+    // state above (one bool/error per Typhoon block), these two buttons are
+    // not tied to a particular slot — each press fills as many of slots
+    // 1/2/3 as the source currently has active typhoons for (see
+    // fetchAllJma/fetchAllJtwc below), so there's exactly one fetching-flag
+    // and one status-message per *source*, not per slot.
+    var jmaFetchingAll = false;
+    var jtwcFetchingAll = false;
+    String? jmaFetchAllStatus;
+    String? jtwcFetchAllStatus;
+    // Whether the *current* jmaFetchAllStatus/jtwcFetchAllStatus text is an
+    // error/nothing-found message (shown in red, matching the per-slot
+    // fetch buttons' error styling) or a success confirmation (shown in the
+    // source's own color) — see fetchAllJma/fetchAllJtwc below.
+    var jmaFetchAllIsError = false;
+    var jtwcFetchAllIsError = false;
     // Guards against calling a StatefulBuilder's setState after this dialog
     // has already been popped (Cancel/Save) while a fetch is still
     // in-flight — set false in both action handlers below, checked before
@@ -790,7 +868,7 @@ class _MapScreenState extends State<MapScreen> {
     await showDialog<void>(
       context: context,
       // Explicit false (2026-07-28, Agent review finding): this dialog can
-      // have a "Fetch from JMA" request in flight, and the default (true)
+      // have an "Import from JMA" request in flight, and the default (true)
       // lets a barrier tap dismiss the dialog without going through either
       // action button below — neither of which would then run, so
       // `dialogOpen` would stay true and a fetch completing afterward could
@@ -818,9 +896,18 @@ class _MapScreenState extends State<MapScreen> {
                 jmaFetchError[i] = null;
               });
               try {
-                final JmaTyphoonInfo jma = await fetchLatestJmaTyphoon();
+                final result = await fetchLatestJmaTyphoon();
                 if (!dialogOpen) return;
-                if (jma.isEmpty) {
+                if (result.info.isEmpty) {
+                  // No active bulletin right now — *not* an error, and
+                  // deliberately leaves jmaFetched[i]/jmaRawXmlLocal[i]/
+                  // jmaFetchedAtLocal[i] untouched: if a previous fetch
+                  // (this session or a restored cache) already has data,
+                  // that stays visible rather than being wiped out by "I
+                  // checked again and nothing's currently active" (2026-07-29
+                  // offline-cache addition — this matters more now that the
+                  // result can be looked at days later at sea with no way to
+                  // re-check).
                   setDialogState(() {
                     jmaFetching[i] = false;
                     jmaFetchError[i] = '現在、気象庁から発表中の台風情報が見つかりませんでした。';
@@ -829,21 +916,157 @@ class _MapScreenState extends State<MapScreen> {
                 }
                 setDialogState(() {
                   jmaFetching[i] = false;
-                  jmaFetched[i] = jma;
-                  // Auto-enable Display on a successful fetch (2026-07-28):
-                  // the whole point of pressing this button is to see the
-                  // result, so requiring a *second* click on a separate
-                  // checkbox before anything shows would be needless
-                  // friction — unlike the JTWC checkbox, which has no
-                  // equivalent "just fetched it" moment to auto-follow.
+                  jmaFetched[i] = result.info;
+                  jmaRawXmlLocal[i] = result.rawXml;
+                  jmaFetchedAtLocal[i] = DateTime.now();
+                  // Auto-enable Display on a successful fetch (2026-07-28,
+                  // and 2026-07-29 for fetchJtwc below): the whole point of
+                  // pressing this button is to see the result, so requiring
+                  // a *second* click on a separate checkbox before anything
+                  // shows would be needless friction.
                   jmaDisplayLocal[i] = true;
                   jmaFetchError[i] = null;
                 });
               } catch (e) {
+                // Network/parse failure — including the expected "no
+                // connectivity right now" case at sea. Leaves any existing
+                // cached fetch (jmaFetched/jmaRawXmlLocal/jmaFetchedAtLocal)
+                // untouched so it's still shown, only the error line is new.
                 if (!dialogOpen) return;
                 setDialogState(() {
                   jmaFetching[i] = false;
                   jmaFetchError[i] = '取得に失敗しました: $e';
+                });
+              }
+            }
+
+            // JTWC fetch (2026-07-29 addition): unlike fetchJma above, this
+            // writes straight into typhoonControllers[i].text — the same
+            // text box a manual paste already fills — rather than into a
+            // separate local array, since JTWC has only the one
+            // representation in this app (see jtwc_feed_fetcher.dart's
+            // fetchLatestJtwcWarningText doc comment). Everything after
+            // that (Save-time parsing/validation, persistence, Display) is
+            // therefore identical to the manual-paste path with no further
+            // wiring needed here.
+            Future<void> fetchJtwc(int i) async {
+              setDialogState(() {
+                jtwcFetching[i] = true;
+                jtwcFetchError[i] = null;
+              });
+              try {
+                final text = await fetchLatestJtwcWarningText();
+                if (!dialogOpen) return;
+                if (text == null) {
+                  // No active storm in the region right now — *not* an
+                  // error, and deliberately leaves typhoonControllers[i]'s
+                  // existing text untouched (same "don't wipe out what's
+                  // already there" principle as fetchJma's isEmpty branch
+                  // above).
+                  setDialogState(() {
+                    jtwcFetching[i] = false;
+                    jtwcFetchError[i] = '現在、この海域で発表中の台風情報が見つかりませんでした。';
+                  });
+                  return;
+                }
+                setDialogState(() {
+                  jtwcFetching[i] = false;
+                  typhoonControllers[i].text = text;
+                  jtwcDisplayLocal[i] = true;
+                  jtwcFetchError[i] = null;
+                });
+              } catch (e) {
+                // Network/parse failure — including the expected "no
+                // connectivity right now" case at sea. Leaves
+                // typhoonControllers[i]'s existing text untouched so it's
+                // still shown, only the error line is new.
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  jtwcFetching[i] = false;
+                  jtwcFetchError[i] = '取得に失敗しました: $e';
+                });
+              }
+            }
+
+            // "Import All" (2026-07-29 addition, TASKS.md「複数台風が同時に
+            // 発表されている場合の対応」): finds every currently-active
+            // typhoon for a source (up to 3 — see fetchActiveJmaTyphoons/
+            // fetchActiveJtwcWarningTexts) and fills Typhoon 1/2/3 with them
+            // in order, in one click, rather than requiring the user to
+            // know in advance how many are active and press each slot's own
+            // per-slot fetch button individually. Slots beyond however many
+            // were found are left untouched (not cleared) — same
+            // "don't erase what's already there" principle the per-slot
+            // fetch closures above already follow for their own "nothing
+            // found" case.
+            Future<void> fetchAllJma() async {
+              setDialogState(() {
+                jmaFetchingAll = true;
+                jmaFetchAllStatus = null;
+              });
+              try {
+                final results = await fetchActiveJmaTyphoons();
+                if (!dialogOpen) return;
+                if (results.isEmpty) {
+                  setDialogState(() {
+                    jmaFetchingAll = false;
+                    jmaFetchAllStatus = '現在、気象庁から発表中の台風情報が見つかりませんでした。';
+                    jmaFetchAllIsError = true;
+                  });
+                  return;
+                }
+                setDialogState(() {
+                  jmaFetchingAll = false;
+                  for (var i = 0; i < results.length && i < jmaFetched.length; i++) {
+                    jmaFetched[i] = results[i].info;
+                    jmaRawXmlLocal[i] = results[i].rawXml;
+                    jmaFetchedAtLocal[i] = DateTime.now();
+                    jmaDisplayLocal[i] = true;
+                  }
+                  jmaFetchAllStatus = _importedToSlotsLabel(results.length);
+                  jmaFetchAllIsError = false;
+                });
+              } catch (e) {
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  jmaFetchingAll = false;
+                  jmaFetchAllStatus = '取得に失敗しました: $e';
+                  jmaFetchAllIsError = true;
+                });
+              }
+            }
+
+            Future<void> fetchAllJtwc() async {
+              setDialogState(() {
+                jtwcFetchingAll = true;
+                jtwcFetchAllStatus = null;
+              });
+              try {
+                final texts = await fetchActiveJtwcWarningTexts();
+                if (!dialogOpen) return;
+                if (texts.isEmpty) {
+                  setDialogState(() {
+                    jtwcFetchingAll = false;
+                    jtwcFetchAllStatus = '現在、この海域で発表中の台風情報が見つかりませんでした。';
+                    jtwcFetchAllIsError = true;
+                  });
+                  return;
+                }
+                setDialogState(() {
+                  jtwcFetchingAll = false;
+                  for (var i = 0; i < texts.length && i < typhoonControllers.length; i++) {
+                    typhoonControllers[i].text = texts[i];
+                    jtwcDisplayLocal[i] = true;
+                  }
+                  jtwcFetchAllStatus = _importedToSlotsLabel(texts.length);
+                  jtwcFetchAllIsError = false;
+                });
+              } catch (e) {
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  jtwcFetchingAll = false;
+                  jtwcFetchAllStatus = '取得に失敗しました: $e';
+                  jtwcFetchAllIsError = true;
                 });
               }
             }
@@ -868,6 +1091,69 @@ class _MapScreenState extends State<MapScreen> {
                           isDense: true,
                         ),
                       ),
+                      const Divider(height: 28),
+                      // "Import All" (2026-07-29 addition, labeled "Import"
+                      // rather than "Fetch" per 2026-07-29 user request —
+                      // see the per-slot "Import from JMA"/"Import from
+                      // JTWC" buttons further below for the same wording
+                      // choice): finds every currently-active typhoon for a
+                      // source (up to 3) and fills Typhoon 1/2/3 with them
+                      // in one click — see fetchAllJma/fetchAllJtwc above
+                      // (function/variable names keep the pre-existing
+                      // "fetch" wording since they're not user-visible, only
+                      // the UI text changed). The per-slot buttons further
+                      // below are unchanged and still useful for refreshing
+                      // just one slot.
+                      const Text('Import All (multiple typhoons at once)',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      Text(
+                        'Finds every typhoon currently active for a source (up to 3) and '
+                        'imports them into Typhoon 1/2/3 in order.',
+                        style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          OutlinedButton.icon(
+                            onPressed: jmaFetchingAll ? null : fetchAllJma,
+                            icon: jmaFetchingAll
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : Icon(Icons.cloud_download, size: 16, color: _jmaColor),
+                            label: Text(jmaFetchingAll ? 'Importing...' : 'Import All (JMA)'),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: jtwcFetchingAll ? null : fetchAllJtwc,
+                            icon: jtwcFetchingAll
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : Icon(Icons.cloud_download, size: 16, color: _jtwcColor),
+                            label: Text(jtwcFetchingAll ? 'Importing...' : 'Import All (JTWC)'),
+                          ),
+                        ],
+                      ),
+                      if (jmaFetchAllStatus != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          jmaFetchAllStatus!,
+                          style: TextStyle(fontSize: 11, color: jmaFetchAllIsError ? Colors.red : _jmaColor),
+                        ),
+                      ],
+                      if (jtwcFetchAllStatus != null) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          jtwcFetchAllStatus!,
+                          style: TextStyle(fontSize: 11, color: jtwcFetchAllIsError ? Colors.red : _jtwcColor),
+                        ),
+                      ],
                       for (var i = 0; i < _typhoonSlots.length; i++) ...[
                         const Divider(height: 28),
                         Row(
@@ -886,8 +1172,20 @@ class _MapScreenState extends State<MapScreen> {
                                 typhoonControllers[i].clear();
                                 parseErrors[i] = null;
                                 jmaFetched[i] = JmaTyphoonInfo.empty;
+                                jmaRawXmlLocal[i] = null;
+                                jmaFetchedAtLocal[i] = null;
                                 jmaDisplayLocal[i] = false;
                                 jmaFetchError[i] = null;
+                                // 2026-07-29 bug fix: JTWC Display wasn't
+                                // being reset here, so a slot that had JTWC
+                                // Display On kept showing the checkbox
+                                // checked after Clear even though the pasted
+                                // text (and thus the map marker) was gone —
+                                // inconsistent with JMA Display just above,
+                                // and with this button's own "for either
+                                // source" comment.
+                                jtwcDisplayLocal[i] = false;
+                                jtwcFetchError[i] = null;
                               }),
                               child: const Text('Clear'),
                             ),
@@ -916,7 +1214,7 @@ class _MapScreenState extends State<MapScreen> {
                                       child: CircularProgressIndicator(strokeWidth: 2),
                                     )
                                   : const Icon(Icons.cloud_download, size: 16),
-                              label: Text(jmaFetching[i] ? 'Fetching...' : 'Fetch from JMA'),
+                              label: Text(jmaFetching[i] ? 'Importing...' : 'Import from JMA'),
                             ),
                           ],
                         ),
@@ -932,22 +1230,58 @@ class _MapScreenState extends State<MapScreen> {
                             '${jmaFetched[i].observedAtJst == null ? '' : ' (${_formatDateTime(jmaFetched[i].observedAtJst!)})'}',
                             style: TextStyle(fontSize: 11, color: _jmaColor),
                           ),
+                          // Offline-cache freshness readout (2026-07-29
+                          // addition): distinct from the bulletin's own
+                          // observed-at time above — this is *when this
+                          // device last successfully talked to JMA*, which
+                          // is what a captain offline for days actually
+                          // needs to judge how stale the cache is.
+                          if (jmaFetchedAtLocal[i] != null) ...[
+                            const SizedBox(height: 2),
+                            Text(
+                              'Cached: ${_formatDateTime(jmaFetchedAtLocal[i]!)}',
+                              style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                            ),
+                          ],
                         ],
                         const SizedBox(height: 10),
-                        // JTWC source (pasted warning text) — unchanged
-                        // parsing/validation behavior, now with its own
-                        // Display checkbox instead of one shared with JMA.
-                        displayCheckbox(
-                          'JTWC Display',
-                          _jtwcColor,
-                          jtwcDisplayLocal[i],
-                          (v) => setDialogState(() => jtwcDisplayLocal[i] = v ?? true),
+                        // JTWC source (pasted warning text, or 2026-07-29:
+                        // fetched via "Import from JTWC" below, which just
+                        // fills the same text box — see fetchJtwc's doc
+                        // comment) — unchanged parsing/validation behavior,
+                        // with its own Display checkbox instead of one
+                        // shared with JMA.
+                        Row(
+                          children: [
+                            displayCheckbox(
+                              'JTWC Display',
+                              _jtwcColor,
+                              jtwcDisplayLocal[i],
+                              (v) => setDialogState(() => jtwcDisplayLocal[i] = v ?? true),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed: jtwcFetching[i] ? null : () => fetchJtwc(i),
+                              icon: jtwcFetching[i]
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    )
+                                  : const Icon(Icons.cloud_download, size: 16),
+                              label: Text(jtwcFetching[i] ? 'Importing...' : 'Import from JTWC'),
+                            ),
+                          ],
                         ),
+                        if (jtwcFetchError[i] != null) ...[
+                          const SizedBox(height: 4),
+                          Text(jtwcFetchError[i]!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+                        ],
                         const SizedBox(height: 4),
                         Text(
-                          'Paste the JTWC warning text below; the number/name '
-                          '(e.g. "11W (NOUL)") and central pressure (e.g. "980hPa") '
-                          'are extracted automatically. Leave blank and Save to clear.',
+                          'Paste the JTWC warning text below, or use "Import from JTWC" above; '
+                          'the number/name (e.g. "11W (NOUL)") and central pressure (e.g. '
+                          '"980hPa") are extracted automatically. Leave blank and Save to clear.',
                           style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
                         ),
                         const SizedBox(height: 4),
@@ -1077,6 +1411,8 @@ class _MapScreenState extends State<MapScreen> {
                         _typhoonSlots[i].jtwcInfo = parsedJtwc[i]!;
                         _typhoonSlots[i].jtwcDisplayEnabled = jtwcDisplayLocal[i];
                         _typhoonSlots[i].jmaInfo = jmaFetched[i];
+                        _typhoonSlots[i].jmaRawXml = jmaRawXmlLocal[i];
+                        _typhoonSlots[i].jmaFetchedAtJst = jmaFetchedAtLocal[i];
                         _typhoonSlots[i].jmaDisplayEnabled = jmaDisplayLocal[i];
                       }
                     });
@@ -2366,20 +2702,38 @@ class _TyphoonSlot {
   JtwcTyphoonInfo jtwcInfo = JtwcTyphoonInfo.empty;
   bool jtwcDisplayEnabled = true;
 
-  // JMA (auto-fetched VPTW60 bulletin via "Fetch from JMA") source (2026-
-  // 07-28 addition: "気象庁と米軍の予報を両方表示、それぞれDisplayで単独表示
-  // 可能に"). Kept as the raw [JmaTyphoonInfo] rather than converted into
+  // JMA (fetched VPTW60 bulletin via "Import from JMA") source (2026-07-28
+  // addition: "気象庁と米軍の予報を両方表示、それぞれDisplayで単独表示可能
+  // に"). Kept as the raw [JmaTyphoonInfo] rather than converted into
   // [JtwcTyphoonInfo] (an earlier version of this feature did that
   // conversion) — [JmaTyphoonInfo.toTrackPoints] carries each forecast
   // point's exact absolute JST time directly, avoiding the lossy "offset
   // hours from the observed time, truncated to a whole hour" representation
   // an Agent review flagged when this was first wired up as a single
-  // JTWC-shaped override. Session-only, same as before: not persisted by
-  // AppStateStorage (see _restoreState/_saveState) — a fresh fetch is
-  // needed after every app restart until the separate Wi-Fi-cache TASKS.md
-  // item is implemented.
+  // JTWC-shaped override.
+  //
+  // 2026-07-29: now persisted as an offline cache (see [jmaRawXml] below) —
+  // scope decided with the user: no periodic auto-fetch (data-usage concern
+  // on a personal-use plan), the "Import from JMA" button stays manual, but
+  // its result should survive an app restart and remain visible even with
+  // no connectivity, rather than vanishing every time the app closes.
   JmaTyphoonInfo jmaInfo = JmaTyphoonInfo.empty;
   bool jmaDisplayEnabled = false;
+
+  // The raw bulletin XML text [jmaInfo] was parsed from (2026-07-29
+  // addition) — this, not [jmaInfo] itself, is what AppStateStorage
+  // persists; _restoreState re-parses it with `parseJmaTyphoonXml` on
+  // startup, mirroring the existing "store raw pasted JTWC text, re-parse on
+  // load" convention (see AppStateStorage's class doc comment). Null until a
+  // fetch has ever succeeded for this slot.
+  String? jmaRawXml;
+
+  // Device-local timestamp of the fetch that produced [jmaRawXml]/[jmaInfo]
+  // (2026-07-29 addition) — shown next to the JMA status line so the user
+  // can tell how old the cached data is (important once it can be looked at
+  // offline, days after the fetch). Plain JST wall-clock DateTime, this
+  // app's usual convention (see jtwc_parser.dart's issuedAtJst doc comment).
+  DateTime? jmaFetchedAtJst;
 
   // 100nm/200nm distance rings (2026-08-14 request). Toggled from the
   // AppBar's Range Ring menu or by tapping a displayed typhoon icon on the
@@ -2391,8 +2745,9 @@ class _TyphoonSlot {
   // きる" — a single shared flag, the original design when only one source
   // could ever be shown per slot, no longer made sense once JTWC/JMA could
   // both be displayed for the same slot at once). jmaRingsEnabled is
-  // session-only, same as the rest of the JMA source's state (see jmaInfo
-  // doc comment) — not persisted by AppStateStorage.
+  // persisted by AppStateStorage same as jtwcRingsEnabled (2026-07-29: the
+  // whole JMA source became persisted then — see jmaRawXml doc comment
+  // above).
   bool jtwcRingsEnabled = true;
   bool jmaRingsEnabled = true;
 }

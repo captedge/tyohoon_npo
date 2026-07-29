@@ -17,7 +17,12 @@ import '../models/voyage_plan_entry.dart';
 /// function `_showLabelSettingsDialog`'s Save handler already calls. That
 /// keeps this module decoupled from jtwc_parser.dart's internals and means
 /// any future improvement to the parser automatically applies to restored
-/// state too, without a migration step.
+/// state too, without a migration step. The JMA source (2026-07-29 addition)
+/// follows the same "store raw, re-parse on load" pattern: the last
+/// successfully-fetched bulletin's *raw XML text* is stored, re-parsed with
+/// `parseJmaTyphoonXml` on load — this is an offline-use cache of a manual
+/// fetch, not a periodic background fetch (scope decided with the user
+/// 2026-07-29: data-usage concerns rule out auto-fetching on a schedule).
 ///
 /// Everything is stored as a single JSON blob under one SharedPreferences
 /// key — this app has no need for querying individual fields, and a single
@@ -76,6 +81,22 @@ class AppStateStorage {
             // jtwcRingsEnabled when rings became per-source — same backward
             // -compatibility reasoning as "displayEnabled" above).
             'ringsEnabled': slot.jtwcRingsEnabled,
+            // JMA offline cache (2026-07-29 addition): the raw bulletin XML
+            // from the last successful "Fetch from JMA" press, re-parsed on
+            // load — same "store raw, re-parse" convention as pastedText
+            // above (see AppStateStorage class doc). Null/absent when
+            // nothing has ever been successfully fetched for this slot.
+            'jmaRawXml': slot.jmaRawXml,
+            // Device-local timestamp of that successful fetch (plain JST
+            // wall-clock DateTime, this app's usual convention — see
+            // jtwc_parser.dart's issuedAtJst doc comment). Stored via
+            // toIso8601String()/DateTime.parse() the same way
+            // VoyagePlanEntry.departureTime already is below: for a
+            // non-UTC-tagged DateTime, that round-trip preserves the
+            // wall-clock fields exactly with no UTC conversion involved.
+            'jmaFetchedAtJst': slot.jmaFetchedAtJst?.toIso8601String(),
+            'jmaDisplayEnabled': slot.jmaDisplayEnabled,
+            'jmaRingsEnabled': slot.jmaRingsEnabled,
           },
       ],
     };
@@ -116,6 +137,15 @@ class AppStateStorage {
             pastedText: (slotJson as Map<String, dynamic>)['pastedText'] as String? ?? '',
             jtwcDisplayEnabled: slotJson['displayEnabled'] as bool? ?? true,
             jtwcRingsEnabled: slotJson['ringsEnabled'] as bool? ?? true,
+            // Absent for state saved before this field existed (2026-07-29) —
+            // null is the correct "nothing cached yet" value, same treatment
+            // as VoyagePlanEntry.sourceCsvFileName above.
+            jmaRawXml: slotJson['jmaRawXml'] as String?,
+            jmaFetchedAtJst: (slotJson['jmaFetchedAtJst'] as String?) == null
+                ? null
+                : DateTime.parse(slotJson['jmaFetchedAtJst'] as String),
+            jmaDisplayEnabled: slotJson['jmaDisplayEnabled'] as bool? ?? false,
+            jmaRingsEnabled: slotJson['jmaRingsEnabled'] as bool? ?? true,
           ),
       ];
       return AppStateSnapshot(
@@ -150,16 +180,30 @@ class TyphoonSlotSnapshot {
     required this.pastedText,
     required this.jtwcDisplayEnabled,
     required this.jtwcRingsEnabled,
+    this.jmaRawXml,
+    this.jmaFetchedAtJst,
+    required this.jmaDisplayEnabled,
+    required this.jmaRingsEnabled,
   });
 
   final String pastedText;
-
-  /// JTWC-source Display/Rings toggles only — the JMA source (2026-07-28
-  /// addition) is deliberately not persisted (a fetch is session-only), so
-  /// there's nothing to save/restore for it. See map_screen.dart's
-  /// `_TyphoonSlot`.
   final bool jtwcDisplayEnabled;
   final bool jtwcRingsEnabled;
+
+  /// Offline cache of the last successful "Fetch from JMA" (2026-07-29
+  /// addition — scope decided with the user: no periodic auto-fetch, manual
+  /// button stays as-is, but its result should survive an app restart/be
+  /// usable offline rather than being session-only as before). [jmaRawXml]
+  /// is the raw bulletin XML text (re-parsed on load, not stored pre-parsed —
+  /// see map_screen.dart's `_TyphoonSlot.jmaRawXml` doc comment), null if
+  /// nothing has ever been successfully fetched for this slot.
+  final String? jmaRawXml;
+
+  /// Device-local timestamp of that fetch, shown to the user as "how old is
+  /// this cached data" — see map_screen.dart.
+  final DateTime? jmaFetchedAtJst;
+  final bool jmaDisplayEnabled;
+  final bool jmaRingsEnabled;
 }
 
 /// Result of [AppStateStorage.load]: everything map_screen.dart needs to

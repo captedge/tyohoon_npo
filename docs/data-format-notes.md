@@ -16,6 +16,7 @@
    - `<id>`と`<link type="application/xml" href="...">`が実電文のURL（例：`https://www.data.jma.go.jp/developer/xml/data/20260716190017_0_VPTW60_010000.xml`）。ファイル名の先頭14桁が発表日時（UTC、`YYYYMMDDHHMMSS`）、続く`_0_VPTW60_010000`が電文種類の固定部分。
    - **実装方針**：`extra.xml`を定期的に取得し、`<title>`が「台風解析・予報情報」を含む最新エントリのURLを都度取り直す（電文URL自体は発表のたびに変わるため固定URLで直接ポーリングはできない）。
 2. **実電文（VPTW60本体）**：上記URLへGETすると台風解析・予報情報のXMLが直接返る（認証不要）。
+3. **複数台風の見分け方（2026-07-29確認済み、実装済み：`fetchActiveJmaTyphoons`）**：`extra.xml`は「発表1回＝1エントリ」の一覧であり「台風1つ＝1エントリ」ではない。アクティブな台風は約3時間おきに新しい電文を発表するため、同じ台風の連続する発表が複数エントリとして並ぶ（実データで確認：同一タイトルのエントリが3時間差で連続していた）。異なる台風を見分けるには、各候補を実際に取得・パースした上で`JmaTyphoonInfo.eventId`（無ければ号数＋名称、それも無ければ電文URL自体）で重複排除する必要がある。一覧の並び順（新しい順）を保ったまま重複排除後の最初のN件を採用すれば、各台風の最新発表を過不足なく拾える。
 
 ### 実電文のスキーマ（2026-07-28、`20260716190017_0_VPTW60_010000.xml`で確認）
 
@@ -60,3 +61,16 @@ JTWCの英語警報テキストを貼り付けて、正規表現で以下を抽�
 - 現在位置：`REPEAT POSIT: 20.8N 118.3E`行から抽出（南緯・西経は符号反転）
 - 発表時刻：`WARNING POSITION:`ブロックの`DDHHMMZ`行（日・時・分、UTC）。JTWC電文には年月が含まれないため、`issuedAtJst(reference)`が呼び出し時点（`reference`）の年月を補ってUTC DateTimeを組み立て、+9時間してJSTへ変換する。
 - 予報点（12/24/36/48/60時間先）：「12 HRS, VALID AT: / 251200Z --- 22.0N 116.4E」のようなブロックから抽出（`EXTENDED OUTLOOK`配下の48/60時間も同一パターンでマッチ）。JTWC電文は絶対日時を持たないため、絶対時刻ではなく「読み込み時刻（`_startTime`）からの経過時間」としてオフセット化して扱う。
+
+## JTWC自動取得のURL構造（実装済み：`lib/utils/jtwc_feed_fetcher.dart`、2026-07-29調査）
+
+実際にJTWCサイト（`https://www.metoc.navy.mil/jtwc/jtwc.html`）をブラウザで開き、通信内容（Networkタブ）を確認して判明した構造。憶測ではなく実機確認済み。
+
+- **一覧フィード**：`https://www.metoc.navy.mil/jtwc/rss/jtwc.rss`（RSS 2.0、プレーンHTTPで取得可・JS不要）。JMAの`extra.xml`に相当する「現在発表中の系統一覧」。`<item>`が地域ごとに分かれており、`<guid>`で判別する：
+  - `NWPAC-NIO-WARNINGS`：北西太平洋／北インド洋（ベンガル湾・アラビア海含む）——本アプリの地図範囲（N5-50/E85-170）に該当するのはこれのみ。
+  - `EPAC-CPAC-WARNINGS`：中部・東太平洋（地図範囲外、対象外）
+  - `SH-WARNINGS`：南半球（地図範囲外、対象外）
+  - `TROPICAL-ADVISORIES`：個別台風ではない広域の熱帯擾乱情報（対象外）
+- 該当`<item>`の`<description>`はCDATA内のHTMLで、`<a href='https://www.metoc.navy.mil/jtwc/products/wp1226web.txt' target='newwin'>TC Warning Text</a>`のような形で警報テキスト本文（`***web.txt`）のリンクを含む。同じHTML内に`.gif`（警報図）・`.tcw`（JMV3.0データ）・`.kmz`（Google Earthオーバーレイ）・`fix.txt`（衛星フィックス報）・`prog.txt`（予報根拠）等の関連リンクも並ぶため、`web.txt`で終わるリンクだけを正規表現で拾う。同時に複数系統が発表中の場合、同じ`<description>`内に系統ごとの見出し・リンク一式がそのまま連結される（実データで確認済み）——複数系統を区別する対応はTASKS.mdの別項目として未着手のまま。
+- `***web.txt`（TC Warning Text）の中身は、既存の`parseJtwcWarningText`が想定する手貼り付けテキストと完全に同一の書式（JTWC公式の警報書式仕様書とも一致確認済み）。取得したテキストはそのまま既存パーサーに渡せる。
+- **既知の注意点**：`/jtwc/products/`配下の個別テキストファイルは、汎用のHTTPクライアント（本調査時のCowork検証環境）からは空応答が返ったが、実ブラウザ経由では問題なく取得できた。User-Agentによるフィルタリングの可能性があるため、`jtwc_feed_fetcher.dart`はブラウザ相当のUser-Agentヘッダーを全リクエストに付与している（一覧フィード自体はUser-Agent無しでも取得できていた）。Windows実機でのネットワークからの動作確認が必要（TASKS.md参照）。

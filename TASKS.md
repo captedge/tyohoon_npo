@@ -5,14 +5,8 @@
 ## 未着手・進行中
 
 - [ ] 海上気象データソースの追加（①沿岸波浪予報＝JMA地方海上予報／Open-Meteo、②黒潮＝海しるAPI、③気圧配置図）の方針決定・未実装。本流（配布可能・Open-Meteo機能無し）と個人用（Open-Meteo機能あり・配布しない）は`--dart-define`のコンパイル時フラグで分岐し、ブランチは分けない。詳細は`docs/devlog-online-xml.md`参照。
-- [ ] （仮方針・変更可能性あり）オンライン化を先に完了・マージしてからモバイル対応に着手する進め方で合意（`feature/online-xml`→マージ→`feature/mobile`。詳細は`docs/devlog-architecture-roadmap.md`参照）
-- [ ] JMA自動取得の「常時ON/OFF設定」化・定期実行（現状は`Information`ダイアログの「Fetch from JMA」ボタンを押した時だけ取得する手動トリガー方式、2026-07-28実装済み。次は「Wi-Fi接続時にアプリが自動でバックグラウンド取得する」設定への発展、`docs/devlog-architecture-roadmap.md`の方針参照）
-- [ ] Wi-Fi時まとめ取得＋オフラインキャッシュの仕組み（取得した電文をローカル保存し、船上でのオフライン時にも直近の取得結果を表示できるようにする。現状は取得結果をセッション内メモリのみに保持し、アプリ再起動で失われる仕様、`docs/data-format-notes.md`参照）
-- [ ] 複数台風が同時に発表されている場合の対応（現状`extra.xml`から見つかった最初の「台風解析・予報情報」エントリ1件のみ取得。Typhoon 2/3欄でも同じ最新1件が取得される仕様のため、複数系統が同時発表されている状況では区別できない）
-- [ ] JTWC（米軍）テキストページの読込・パース（日時・緯度経度を抽出。抽出パターンは既に`lib/utils/jtwc_parser.dart`に実装済み・仕様は`docs/data-format-notes.md`参照。今回追加するのはページ取得＝定期フェッチ部分）
-- [ ] Wi-Fi時まとめ取得＋オフラインキャッシュの仕組み設計
-- [ ] 台風データの実データ接続（JMA防災情報XML・JTWCページ取得）を`MapScreen`に反映（`lib/screens/map_screen.dart`の`_trackPointsForSlot`参照。サンプルフォールバックは2026-07-27に廃止済み）
 - [ ] CSVライブラリの上限50件到達時のエラー表示のみ未確認（他の全項目はWindows実機で確認済み、`docs/completed-log.md`参照）。50件貯める機会があれば確認する
+- [ ] （Windows実機確認待ち）複数台風同時発表対応・Import Allボタン（2026-07-29実装、1件のみの場合の動作は実機確認済み）：「Import All (JMA)」「Import All (JTWC)」で2件以上同時に見つかった場合、Typhoon 1/2/3それぞれ独立してDisplay On/Off切替できるか（コード上は独立していることを確認済みだが実機未確認）。あわせて完了メッセージ「Imported to Typhoon 1, 2」等の表記も確認。「Fetch」→「Import」への表記統一箇所（Import from JMA/JTWC、Import All）も見た目を確認。
 
 ## 決定待ち・要確認事項
 
