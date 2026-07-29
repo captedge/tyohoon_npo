@@ -7,6 +7,8 @@
 
 ---
 
+**commit.batの新規ファイル取りこぼしの原因究明・恒久対策**（2026-07-29）— CSVライブラリ機能・JMA自動取得機能のソース本体が`completed-log.md`上は「コミット済み」と記録されていたにも関わらず、実際には一度もpushされていなかった問題を調査。原因は`commit.bat`の`git add`が新規ファイルを手動で個別列挙する方式で、追記漏れが起きると静かに置き去りにする構造だったこと（2026-07-27にも同種の事故が一度起きていたが根本対応せず再発）。`git add -A`への切替、`docs/operation-rules.md`・`docs/flutter-windows-env-notes.md`への再発防止ルール追記で対応。経緯・教訓は`docs/operation-rules.md`「commit.batの新規ファイル取りこぼし」参照。
+
 **プロジェクト運用の土台構築**（2026-07-25）— 5つの宣言（`docs/project-declarations.md`）に基づき、CLAUDE.md／TASKS.md／`docs/operation-rules.md`（本プロジェクト用に書き換え）／`docs/completed-log.md`を整備。技術スタック（Flutter、デスクトップ先行）、セッション構成（単一セッションで進行管理とコーディングを兼務）、Flutterプロジェクトパス（`typhoon_ship_tracker/`、英数字のみ）を決定。ブートストラップ用の`CLAUDE.md追記スニペット.md`は内容反映済みのため削除。
 
 **Flutter×Windows環境メモの反映**（2026-07-25）— ユーザー提供の`flutter-windows-env-notes.md`（Flutter SDK/Android SDKパス、AVD名、`flutter analyze`クラッシュ問題、`.bat`/git操作の既知の落とし穴等）を`docs/`に保存し、CLAUDE.mdのセッション開始チェックリストと環境構成、`docs/operation-rules.md`の完了報告前チェック・git運用から参照するよう反映。
