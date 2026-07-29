@@ -8,6 +8,7 @@ git add typhoon_ship_tracker/lib/models/ship_waypoint.dart typhoon_ship_tracker/
 git add typhoon_ship_tracker/lib/screens/voyage_plan_screen.dart
 git add typhoon_ship_tracker/lib/utils/app_state_storage.dart typhoon_ship_tracker/lib/utils/marker_icons.dart
 git add typhoon_ship_tracker/lib/utils/voyage_plan.dart typhoon_ship_tracker/lib/utils/voyage_plan_parser.dart
+git add docs/devlog-online-xml.md
 git commit -F commit_message.txt
 git push -u origin main
 pause

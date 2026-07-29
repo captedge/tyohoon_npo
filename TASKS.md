@@ -4,6 +4,7 @@
 
 ## 未着手・進行中
 
+- [ ] 海上気象データソースの追加（①沿岸波浪予報＝JMA地方海上予報／Open-Meteo、②黒潮＝海しるAPI、③気圧配置図）の方針決定・未実装。本流（配布可能・Open-Meteo機能無し）と個人用（Open-Meteo機能あり・配布しない）は`--dart-define`のコンパイル時フラグで分岐し、ブランチは分けない。詳細は`docs/devlog-online-xml.md`参照。
 - [ ] （仮方針・変更可能性あり）オンライン化を先に完了・マージしてからモバイル対応に着手する進め方で合意（`feature/online-xml`→マージ→`feature/mobile`。詳細は`docs/devlog-architecture-roadmap.md`参照）
 - [ ] JMA自動取得の「常時ON/OFF設定」化・定期実行（現状は`Information`ダイアログの「Fetch from JMA」ボタンを押した時だけ取得する手動トリガー方式、2026-07-28実装済み。次は「Wi-Fi接続時にアプリが自動でバックグラウンド取得する」設定への発展、`docs/devlog-architecture-roadmap.md`の方針参照）
 - [ ] Wi-Fi時まとめ取得＋オフラインキャッシュの仕組み（取得した電文をローカル保存し、船上でのオフライン時にも直近の取得結果を表示できるようにする。現状は取得結果をセッション内メモリのみに保持し、アプリ再起動で失われる仕様、`docs/data-format-notes.md`参照）
