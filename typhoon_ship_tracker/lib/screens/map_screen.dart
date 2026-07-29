@@ -1923,8 +1923,30 @@ class _MapScreenState extends State<MapScreen> {
       maxLon: maxLon,
     );
 
+    // Open-Meteo's hourly series starts at *today 00:00 real/device time*
+    // and runs `forecastDays` out from there (API docs) — it is NOT
+    // anchored to _startTime, which can itself already be hours into that
+    // window (e.g. a typhoon issued yesterday) and which playback then
+    // advances up to _maxOffsetHours further. The fetch previously used the
+    // function's 2-day default regardless of how long the loaded voyage
+    // actually plays for; once a longer playback ran past that ~48h fetched
+    // window, every later point clamped to the last fetched hour's value
+    // (see interpolateHourlyValue's "not before/after the series" clamping
+    // in wave_field.dart) — the color would then stop changing for the rest
+    // of playback (2026-07-29 user report: "色が再生から最後まで変わって
+    // いかない"). Fixed by sizing the request to the playback's own actual
+    // end time (real elapsed days from now, not from _startTime), +1 day
+    // safety margin, clamped to the API's documented maximum of 8.
+    final playbackEnd = _startTime.add(Duration(minutes: (_maxOffsetHours * 60).round()));
+    final daysFromNowToPlaybackEnd = playbackEnd.difference(DateTime.now()).inHours / 24.0;
+    // math.max/min (not num.clamp, which returns `num` rather than `int` —
+    // a past pitfall already hit elsewhere in this codebase, see
+    // docs/completed-log.md's map-screen 2026-07-26 entries) keeps this an
+    // actual `int`, matching fetchOpenMeteoMarineGrid's `int forecastDays`.
+    final forecastDays = math.max(1, math.min(8, daysFromNowToPlaybackEnd.ceil() + 1));
+
     try {
-      final results = await fetchOpenMeteoMarineGrid(points: gridPoints);
+      final results = await fetchOpenMeteoMarineGrid(points: gridPoints, forecastDays: forecastDays);
       if (!mounted) return;
       setState(() {
         _waveFieldGrid = [
