@@ -4,7 +4,11 @@
 
 ## 未着手・進行中
 
-- [ ] 海上気象データソースの追加（①沿岸波浪予報＝JMA地方海上予報／Open-Meteo、②黒潮＝海しるAPI、③気圧配置図）の方針決定・未実装。本流（配布可能・Open-Meteo機能無し）と個人用（Open-Meteo機能あり・配布しない）は`--dart-define`のコンパイル時フラグで分岐し、ブランチは分けない。詳細は`docs/devlog-online-xml.md`参照。
+- [ ] 海上気象データソースの追加、①沿岸波浪予報（JMA地方海上予報＝VPCY51）から着手（2026-07-29着手）。表示範囲南側（フィリピン近海、北緯5〜19°）は地方海上予報区の対象外のため非表示のままとする方針を確認済み（2026-07-29）。予報区ポリゴンデータ・区域名定数・電文パーサー（`lib/utils/marine_areas.dart`／`marine_area_codes.dart`／`jma_marine_xml_parser.dart`）は実装済み——経緯・詳細は`docs/completed-log.md`と`docs/devlog-online-xml.md`参照。**次にやること**：
+  - [ ] `regular.xml`の実データ裏取り・パーサーの実データ確認（最優先）：Coworkサンドボックスからは古いキャッシュしか取得できず未達成（`docs/data-format-notes.md`「Cowork環境からのregular.xml取得の制約」参照）。Windows実機でアプリ自身がHTTPリクエストする形（「Import」相当の機能を作って）で確認する。パーサーは公式PDFの記載のみに基づく未検証実装で、Agentレビューで一度実バグ（Area要素の探索方向の誤り）が見つかっている（`docs/devlog-online-xml.md`「Dartパーサー実装・Agentレビューで発見したバグ」参照）——他にも同種の見落としが無いか、実データでの確認時に注意する。
+  - [ ] `MapPainter`への予報区ポリゴン塗り分け描画追加、Informationダイアログへの取得UI追加（上記の実データ確認が済んでから着手するのが望ましい）。
+  - [ ] ②黒潮＝海しるAPI、③気圧配置図は未着手（`docs/devlog-online-xml.md`参照）。
+  - 本流（配布可能・Open-Meteo機能無し）と個人用（Open-Meteo機能あり・配布しない）は`--dart-define`のコンパイル時フラグで分岐し、ブランチは分けない。
 - [ ] CSVライブラリの上限50件到達時のエラー表示のみ未確認（他の全項目はWindows実機で確認済み、`docs/completed-log.md`参照）。50件貯める機会があれば確認する
 - [ ] （Windows実機確認待ち）複数台風同時発表対応・Import Allボタン（2026-07-29実装、1件のみの場合の動作は実機確認済み）：「Import All (JMA)」「Import All (JTWC)」で2件以上同時に見つかった場合、Typhoon 1/2/3それぞれ独立してDisplay On/Off切替できるか（コード上は独立していることを確認済みだが実機未確認）。あわせて完了メッセージ「Imported to Typhoon 1, 2」等の表記も確認。「Fetch」→「Import」への表記統一箇所（Import from JMA/JTWC、Import All）も見た目を確認。
 
