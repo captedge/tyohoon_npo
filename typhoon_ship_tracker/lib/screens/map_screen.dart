@@ -11,17 +11,23 @@ import '../models/ship_waypoint.dart';
 import '../models/track_point.dart';
 import '../models/voyage_plan_entry.dart';
 import '../utils/app_state_storage.dart';
+import '../utils/build_flags.dart';
 import '../utils/coastline.dart';
 import '../utils/csv_library.dart';
 import '../utils/interpolation.dart';
 import '../utils/jma_feed_fetcher.dart';
+import '../utils/jma_marine_feed_fetcher.dart';
+import '../utils/jma_marine_xml_parser.dart';
 import '../utils/jma_xml_parser.dart';
 import '../utils/jtwc_feed_fetcher.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
+import '../utils/marine_area_codes.dart';
 import '../utils/marker_icons.dart';
+import '../utils/open_meteo_marine_fetcher.dart';
 import '../utils/voyage_plan.dart';
 import '../utils/voyage_plan_parser.dart';
+import '../utils/wave_field.dart';
 import '../widgets/map_painter.dart';
 import 'voyage_plan_screen.dart';
 
@@ -150,6 +156,30 @@ class _MapScreenState extends State<MapScreen> {
   double _offsetHours = 24;
   bool _isPlaying = false;
   Timer? _playTimer;
+
+  // --- Wave field overlay state (2026-07-29, personal build only) ---
+  //
+  // See build_flags.dart's kPersonalBuild and wave_field.dart's top-of-file
+  // doc comment for the overall design. All of this stays at its initial
+  // "off"/empty value in a mainline build since the only UI that flips
+  // _waveFieldEnabled is itself gated by kPersonalBuild (see the AppBar
+  // toggle in build()) — nothing here runs unless the user explicitly turns
+  // the overlay on in a personal build.
+  bool _waveFieldEnabled = false;
+  bool _waveFieldLoading = false;
+  String? _waveFieldError;
+  List<WaveFieldPoint>? _waveFieldGrid;
+
+  // Free-running animation clock for the flow streaks (see
+  // MapPainter._drawWaveStreaks), independent of the playback timeline's
+  // _startTime/_offsetHours — the streaks are a decorative "is the sea
+  // moving" cue, not a plotted forecast value, so they animate continuously
+  // in real device time rather than advancing only while Play is pressed.
+  // Ticks only while _waveFieldEnabled (see _setWaveFieldEnabled), same
+  // "don't pay for what you're not showing" spirit as _playTimer only
+  // running while _isPlaying.
+  double _waveAnimSeconds = 0;
+  Timer? _waveAnimTimer;
 
   // Playback speed as a multiplier of the original fixed-speed behavior
   // (1.0 = "1 simulated hour per 200ms tick", which is what this screen
@@ -388,6 +418,7 @@ class _MapScreenState extends State<MapScreen> {
   @override
   void dispose() {
     _playTimer?.cancel();
+    _waveAnimTimer?.cancel();
     _transformationController.removeListener(_syncFromController);
     _transformationController.dispose();
     super.dispose();
@@ -1434,6 +1465,508 @@ class _MapScreenState extends State<MapScreen> {
     }
   }
 
+  // --- Marine forecast (VPCY51) debug fetch (2026-07-29 addition) ---
+  //
+  // Temporary verification tool, NOT the eventual production feature — see
+  // TASKS.md "regular.xmlの実データ裏取り・パーサーの実データ確認（最優先）".
+  // jma_marine_xml_parser.dart's fields are all sourced from JMA's official
+  // PDF and have never been checked against a real bulletin (Cowork's
+  // sandbox can't reach a fresh regular.xml — see docs/data-format-notes.md
+  // "Cowork環境からのregular.xml取得の制約"). This button lets the app itself
+  // fetch over the Windows machine's real network path (same verification
+  // pattern already used for the JTWC/JMA typhoon fetchers) and shows the
+  // raw parsed result — including any per-bulletin parse error — so a human
+  // can compare it against the source XML / real forecast text. Once real
+  // data confirms (or exposes bugs in) the parser, the eventual replacement
+  // is the polished "取得UI" + MapPainter polygon-fill drawing described in
+  // TASKS.md; this dialog is intentionally plain (no map drawing, no
+  // persistence) since its only job is answering "does the parser read real
+  // data correctly?".
+  Future<void> _showMarineForecastDebugDialog() async {
+    var loading = false;
+    String? errorText;
+    JmaMarineFetchResult? result;
+
+    // Same dialog-lifecycle guard as _showLabelSettingsDialog's "Import from
+    // JMA" button (barrierDismissible: false + a local dialogOpen bool
+    // checked before every setDialogState call after an await): without it,
+    // dismissing this dialog (barrier tap / Close / back) while a fetch is
+    // in flight would let runFetch()'s setDialogState fire after the dialog
+    // State is disposed once the fetch resolves — the same defect class
+    // documented in docs/operation-rules.md item 5 (Agent review caught this
+    // omission on the first pass; fixed here before shipping).
+    var dialogOpen = true;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            Future<void> runFetch() async {
+              setDialogState(() {
+                loading = true;
+                errorText = null;
+              });
+              try {
+                final fetched = await fetchLatestMarineForecast();
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  result = fetched;
+                  loading = false;
+                });
+              } on JmaMarineFetchException catch (e) {
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  errorText = e.toString();
+                  loading = false;
+                });
+              } catch (e) {
+                // Broad catch-all deliberately kept in addition to the
+                // JmaMarineFetchException branch above: this dialog's whole
+                // purpose is catching real-data surprises in
+                // jma_marine_xml_parser.dart, whose schema is explicitly
+                // unverified (see that file's top-of-file caveat). Without
+                // this, an exception type other than
+                // JmaMarineXmlParseException/JmaMarineFetchException (e.g. a
+                // null-check or type error from an unexpected real bulletin
+                // shape) would propagate uncaught, leaving `loading` stuck
+                // true forever with no visible error (Agent review flagged
+                // this gap).
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  errorText = 'Unexpected error: $e';
+                  loading = false;
+                });
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Marine forecast (VPCY51) — debug'),
+              content: SizedBox(
+                width: 480,
+                height: 420,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    Text(
+                      'regular.xmlから地方海上予報（VPCY51）を取得し、パーサー結果をそのまま表示します'
+                      '（検証用、地図・保存には反映されません）。',
+                      style: TextStyle(fontSize: 12, color: Colors.grey.shade700),
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton(
+                      onPressed: loading ? null : runFetch,
+                      child: Text(loading ? 'Fetching...' : 'Fetch regular.xml (VPCY51)'),
+                    ),
+                    if (errorText != null) ...[
+                      const SizedBox(height: 8),
+                      Text(errorText!, style: const TextStyle(color: Colors.red)),
+                    ],
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: result == null
+                          ? Center(
+                              child: Text(
+                                loading ? '' : 'Not fetched yet.',
+                                style: TextStyle(color: Colors.grey.shade600),
+                              ),
+                            )
+                          : _buildMarineForecastDebugResult(result!),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    dialogOpen = false;
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildMarineForecastDebugResult(JmaMarineFetchResult result) {
+    if (result.bulletins.isEmpty) {
+      return Center(
+        child: Text(
+          'No 地方海上予報 entry found in regular.xml right now\n'
+          '(normal outside the ~6/12/18/24 JST issue windows).',
+          style: TextStyle(color: Colors.grey.shade600),
+        ),
+      );
+    }
+    return ListView(
+      children: [
+        for (final bulletin in result.bulletins) _buildMarineBulletinDebugTile(bulletin),
+      ],
+    );
+  }
+
+  Widget _buildMarineBulletinDebugTile(JmaMarineBulletin bulletin) {
+    if (bulletin.parseError != null) {
+      return Card(
+        color: Colors.red.shade50,
+        child: Padding(
+          padding: const EdgeInsets.all(8),
+          child: Text(
+            'PARSE ERROR\n${bulletin.sourceUrl}\n${bulletin.parseError}',
+            style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+          ),
+        ),
+      );
+    }
+    return ExpansionTile(
+      title: Text(
+        '${bulletin.forecasts.length} forecast(s) — ${bulletin.sourceUrl}',
+        style: const TextStyle(fontSize: 11),
+      ),
+      children: [
+        for (final f in bulletin.forecasts)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 2),
+            child: Text(
+              _formatMarineForecastDebugLine(f),
+              style: const TextStyle(fontSize: 12, fontFamily: 'monospace'),
+            ),
+          ),
+      ],
+    );
+  }
+
+  // Plain-text one-line summary of one MarineWaveForecast for the debug
+  // dialog above — built with a StringBuffer (rather than one large
+  // interpolated literal) so the conditional "→ becoming" tail stays easy to
+  // read/verify against jma_marine_xml_parser.dart's field doc comments.
+  String _formatMarineForecastDebugLine(MarineWaveForecast f) {
+    final buffer = StringBuffer();
+    final name = f.areaName ?? marineAreaNames[f.areaCode] ?? '?';
+    buffer.write('[${f.areaCode}] $name (${f.periodLabel ?? "-"}): ');
+    buffer.write('base=${f.baseHeightM?.toString() ?? "-"}m');
+    if (f.baseDescription != null) buffer.write(' (${f.baseDescription})');
+    if (f.becoming.isNotEmpty) {
+      final parts = [
+        for (final b in f.becoming) '${b.timeModifierText ?? "?"}: ${b.heightM?.toString() ?? "-"}m',
+      ];
+      buffer.write('  →  ${parts.join(", ")}');
+    }
+    return buffer.toString();
+  }
+
+  // --- Open-Meteo marine weather trial (personal build only, 2026-07-29) ---
+  //
+  // See build_flags.dart's kPersonalBuild doc comment and
+  // docs/devlog-online-xml.md "Open-Meteoとの比較" for why this exists and
+  // why it's gated: Open-Meteo's free tier is documented as non-commercial-
+  // use only. Capt.Edge asked to try it out (as an alternative/supplement to
+  // the VPCY51 debug dialog above) before deciding whether to invest further
+  // or drop it — so, same spirit as that dialog, this is a trial/
+  // verification UI, not yet wired into the map itself.
+  Future<void> _showOpenMeteoDebugDialog() async {
+    // Default query point: the first currently-displayed ship's interpolated
+    // position at the current playback time, if one is loaded (matches what
+    // the user is actually looking at); otherwise MapBounds' own default
+    // center (same fallback the map itself uses before any data is loaded).
+    final defaultTracks = _activeShipTracks;
+    final defaultPosition = defaultTracks.isNotEmpty
+        ? positionAt(defaultTracks.first.track, _currentTime)
+        : const LatLng(MapBounds.defaultCenterLat, MapBounds.defaultCenterLon);
+
+    final latController = TextEditingController(text: defaultPosition.latitude.toStringAsFixed(4));
+    final lonController = TextEditingController(text: defaultPosition.longitude.toStringAsFixed(4));
+    var loading = false;
+    String? errorText;
+    OpenMeteoMarineResult? result;
+
+    // Same dialog-lifecycle guard as the VPCY51 debug dialog above (and
+    // _showLabelSettingsDialog's "Import from JMA") — see that dialog's doc
+    // comment for the exact failure mode this prevents.
+    var dialogOpen = true;
+
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            Future<void> runFetch() async {
+              final lat = double.tryParse(latController.text.trim());
+              final lon = double.tryParse(lonController.text.trim());
+              if (lat == null || lon == null) {
+                setDialogState(() => errorText = '緯度・経度を数値で入力してください。');
+                return;
+              }
+              setDialogState(() {
+                loading = true;
+                errorText = null;
+              });
+              try {
+                final fetched = await fetchOpenMeteoMarine(latitude: lat, longitude: lon);
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  result = fetched;
+                  loading = false;
+                });
+              } catch (e) {
+                // Broad catch-all (same reasoning as the VPCY51 debug dialog
+                // above): this is a first trial of a third-party API this
+                // app has never called before, so an unexpected response
+                // shape throwing something other than
+                // OpenMeteoFetchException is a real possibility, not just a
+                // theoretical one.
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  errorText = e.toString();
+                  loading = false;
+                });
+              }
+            }
+
+            return AlertDialog(
+              title: const Text('Open-Meteo marine (trial, personal build)'),
+              content: SizedBox(
+                width: 480,
+                height: 460,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    const Text(
+                      '個人利用限定の試用機能です。地図・保存には反映されません。'
+                      'データ提供: DWD（ドイツ気象庁）via Open-Meteo.com',
+                      style: TextStyle(fontSize: 11, color: Colors.grey),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: latController,
+                            decoration: const InputDecoration(labelText: 'Latitude', isDense: true),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: TextField(
+                            controller: lonController,
+                            decoration: const InputDecoration(labelText: 'Longitude', isDense: true),
+                            keyboardType: const TextInputType.numberWithOptions(decimal: true, signed: true),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    FilledButton(
+                      onPressed: loading ? null : runFetch,
+                      child: Text(loading ? 'Fetching...' : 'Fetch wave forecast'),
+                    ),
+                    if (errorText != null) ...[
+                      const SizedBox(height: 8),
+                      Text(errorText!, style: const TextStyle(color: Colors.red)),
+                    ],
+                    const SizedBox(height: 8),
+                    Expanded(
+                      child: result == null
+                          ? Center(
+                              child: Text(
+                                loading ? '' : 'Not fetched yet.',
+                                style: TextStyle(color: Colors.grey.shade600),
+                              ),
+                            )
+                          : _buildOpenMeteoDebugResult(result!),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () {
+                    dialogOpen = false;
+                    Navigator.pop(dialogContext);
+                  },
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+    latController.dispose();
+    lonController.dispose();
+  }
+
+  Widget _buildOpenMeteoDebugResult(OpenMeteoMarineResult result) {
+    final now = _currentTime;
+    // Only show from "now" (playback current time) onward, capped at 48
+    // rows, so the list stays short enough to scan by eye rather than
+    // dumping the full multi-day series — this is a trial UI, not a data
+    // export tool. Falls back to showing the beginning of the series if
+    // every returned point is already in the past (e.g. playback scrubbed
+    // to a time before the forecast's start).
+    final upcoming = result.points.where((p) => !p.time.isBefore(now)).take(48).toList();
+    final shown = upcoming.isEmpty ? result.points.take(48).toList() : upcoming;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Grid cell used: ${result.latitude.toStringAsFixed(3)}, ${result.longitude.toStringAsFixed(3)}',
+          style: const TextStyle(fontSize: 11, color: Colors.grey),
+        ),
+        const SizedBox(height: 4),
+        Expanded(
+          child: ListView.builder(
+            itemCount: shown.length,
+            itemBuilder: (context, index) {
+              final p = shown[index];
+              final isNow = index == 0 && upcoming.isNotEmpty;
+              return Text(
+                '${_formatOpenMeteoDebugTime(p.time)}  '
+                'wave=${p.waveHeightM?.toStringAsFixed(1) ?? "-"}m  '
+                'dir=${p.waveDirectionDeg?.toStringAsFixed(0) ?? "-"}°  '
+                'period=${p.wavePeriodS?.toStringAsFixed(1) ?? "-"}s'
+                '${isNow ? "  ← now" : ""}',
+                style: TextStyle(
+                  fontSize: 12,
+                  fontFamily: 'monospace',
+                  fontWeight: isNow ? FontWeight.bold : FontWeight.normal,
+                ),
+              );
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  String _formatOpenMeteoDebugTime(DateTime t) {
+    String two(int n) => n.toString().padLeft(2, '0');
+    return '${two(t.month)}/${two(t.day)} ${two(t.hour)}:${two(t.minute)}';
+  }
+
+  // --- Wave field map overlay (personal build only, 2026-07-29) ---
+  //
+  // Follow-up to the Open-Meteo text-only trial dialog above: once that
+  // confirmed real wave data could be fetched, the request became "show it
+  // on the map, color-coded, Windy-style animation, route vicinity only".
+  // See wave_field.dart's top-of-file doc comment and
+  // MapPainter._drawWaveField for the rest of the design.
+
+  // Toggles the overlay on/off (AppBar button in build(), kPersonalBuild
+  // only). Turning on starts the flow-streak animation timer and triggers a
+  // fetch if there's no grid yet (or the last fetch failed); turning off
+  // just stops the timer and hides the overlay — whatever grid was already
+  // fetched is kept, so switching back on doesn't necessarily re-fetch. This
+  // is a trial UI ("見た目を確認したい"), not a live-updating forecast
+  // display, so slightly-stale cached data on toggle-back-on is an
+  // acceptable tradeoff for not re-hitting the API every time.
+  void _setWaveFieldEnabled(bool enabled) {
+    setState(() => _waveFieldEnabled = enabled);
+    if (enabled) {
+      _waveAnimTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
+        if (!mounted) return;
+        setState(() => _waveAnimSeconds += 0.1);
+      });
+      if (_waveFieldGrid == null && !_waveFieldLoading) {
+        _fetchWaveFieldGrid();
+      }
+    } else {
+      _waveAnimTimer?.cancel();
+      _waveAnimTimer = null;
+    }
+  }
+
+  // Computes the sample grid's bounding box — the active route(s)' own
+  // bounding box padded by _waveFieldRoutePaddingDeg ("route vicinity",
+  // 2026-07-29 decision), or a small fixed box around MapBounds' default
+  // center if no route is registered yet — then fetches wave data for it
+  // via Open-Meteo's batched multi-location endpoint.
+  static const double _waveFieldRoutePaddingDeg = 1.0;
+  static const double _waveFieldDefaultHalfBoxDeg = 3.0;
+
+  Future<void> _fetchWaveFieldGrid() async {
+    setState(() => _waveFieldLoading = true);
+
+    final tracks = _activeShipTracks;
+    double minLat, maxLat, minLon, maxLon;
+    if (tracks.isNotEmpty) {
+      final allPoints = [for (final t in tracks) ...t.track];
+      minLat = allPoints.map((p) => p.latitude).reduce(math.min) - _waveFieldRoutePaddingDeg;
+      maxLat = allPoints.map((p) => p.latitude).reduce(math.max) + _waveFieldRoutePaddingDeg;
+      minLon = allPoints.map((p) => p.longitude).reduce(math.min) - _waveFieldRoutePaddingDeg;
+      maxLon = allPoints.map((p) => p.longitude).reduce(math.max) + _waveFieldRoutePaddingDeg;
+    } else {
+      minLat = MapBounds.defaultCenterLat - _waveFieldDefaultHalfBoxDeg;
+      maxLat = MapBounds.defaultCenterLat + _waveFieldDefaultHalfBoxDeg;
+      minLon = MapBounds.defaultCenterLon - _waveFieldDefaultHalfBoxDeg;
+      maxLon = MapBounds.defaultCenterLon + _waveFieldDefaultHalfBoxDeg;
+    }
+    // Clamp to the app's own fixed display range (MapBounds) so a route
+    // near the edge of that range doesn't request points from far outside
+    // anywhere this map ever draws.
+    minLat = minLat.clamp(MapBounds.minLat, MapBounds.maxLat);
+    maxLat = maxLat.clamp(MapBounds.minLat, MapBounds.maxLat);
+    minLon = minLon.clamp(MapBounds.minLon, MapBounds.maxLon);
+    maxLon = maxLon.clamp(MapBounds.minLon, MapBounds.maxLon);
+
+    final gridPoints = buildWaveFieldGridPoints(
+      minLat: minLat,
+      maxLat: maxLat,
+      minLon: minLon,
+      maxLon: maxLon,
+    );
+
+    try {
+      final results = await fetchOpenMeteoMarineGrid(points: gridPoints);
+      if (!mounted) return;
+      setState(() {
+        _waveFieldGrid = [
+          for (final r in results) WaveFieldPoint(lat: r.latitude, lon: r.longitude, hourly: r.points),
+        ];
+        _waveFieldLoading = false;
+      });
+    } catch (e) {
+      // Broad catch-all deliberately kept (same reasoning as the Open-Meteo
+      // debug dialog above): this batched multi-location request path is
+      // even less exercised than the single-point one, so an unexpected
+      // response shape is a real possibility, not just theoretical.
+      if (!mounted) return;
+      setState(() => _waveFieldLoading = false);
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Wave field fetch failed: $e')),
+      );
+    }
+  }
+
+  // Resolves the fetched grid (a whole hourly series per point) down to "one
+  // value per point at the current playback time" for MapPainter — see
+  // wave_field.dart's interpolateHourlyValue. Recomputed on every build
+  // (cheap: linear scan of a small, capped-size grid) since it depends on
+  // _currentTime, which changes continuously during playback; the expensive
+  // part (the network fetch) stays cached in _waveFieldGrid and is not
+  // touched here.
+  List<WaveFieldSample> get _currentWaveFieldSamples {
+    final grid = _waveFieldGrid;
+    if (!_waveFieldEnabled || grid == null) return const [];
+    final time = _currentTime;
+    return [
+      for (final p in grid)
+        WaveFieldSample(
+          lat: p.lat,
+          lon: p.lon,
+          heightM: interpolateHourlyValue(p.hourly, time, (h) => h.waveHeightM),
+          directionDeg: interpolateHourlyValue(p.hourly, time, (h) => h.waveDirectionDeg, wrapsAt360: true),
+        ),
+    ];
+  }
+
   // Passage Plan: import/register/edit/delete up to _maxVoyagePlans CSVs
   // (2026-08-xx request, extending the 2026-07-30 single-plan version).
   // "Import CSV" parses a JRC ECDIS route CSV, opens VoyagePlanScreen to
@@ -2341,6 +2874,44 @@ class _MapScreenState extends State<MapScreen> {
             tooltip: 'Information',
             onPressed: _showLabelSettingsDialog,
           ),
+          // Temporary verification tool (2026-07-29) — see the doc comment
+          // on _showMarineForecastDebugDialog for why this exists and why
+          // it's deliberately separate from the Information dialog above.
+          IconButton(
+            icon: const Icon(Icons.waves),
+            tooltip: 'Marine forecast (debug)',
+            onPressed: _showMarineForecastDebugDialog,
+          ),
+          // Personal-build only (2026-07-29) — see build_flags.dart's
+          // kPersonalBuild doc comment. This whole button (and everything it
+          // calls) is compiled out of a mainline build via dead-code
+          // elimination on the `if (kPersonalBuild)` const-false branch, not
+          // merely hidden at runtime.
+          if (kPersonalBuild)
+            IconButton(
+              icon: const Icon(Icons.water),
+              tooltip: 'Open-Meteo marine (trial)',
+              onPressed: _showOpenMeteoDebugDialog,
+            ),
+          // Map overlay toggle (2026-07-29 follow-up request: "地図上に波高
+          // を色分け表示、Windy風のアニメーション、航路周辺のみ") — separate
+          // from the text-only debug dialog above, which stays as-is for raw
+          // data inspection. Highlighted (tinted) while on, spinner while a
+          // fetch is in flight, same "disabled while loading" convention as
+          // the debug dialog's own Fetch button.
+          if (kPersonalBuild)
+            IconButton(
+              icon: _waveFieldLoading
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.blur_on),
+              color: _waveFieldEnabled ? Colors.blue : null,
+              tooltip: 'Wave field overlay (trial)',
+              onPressed: _waveFieldLoading ? null : () => _setWaveFieldEnabled(!_waveFieldEnabled),
+            ),
         ],
       ),
       body: Column(
@@ -2395,6 +2966,11 @@ class _MapScreenState extends State<MapScreen> {
                             typhoons: typhoons,
                             shipIcon: _shipIcon,
                             typhoonIcon: _typhoonIcon,
+                            // Always the empty default in a mainline build —
+                            // see _currentWaveFieldSamples' doc comment and
+                            // build_flags.dart's kPersonalBuild.
+                            waveField: _currentWaveFieldSamples,
+                            waveAnimSeconds: _waveAnimSeconds,
                           ),
                         ),
                       ),

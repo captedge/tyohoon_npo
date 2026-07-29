@@ -148,6 +148,44 @@ class ShipMarker {
   });
 }
 
+/// One point of the "wave field" overlay (2026-07-29 request, personal build
+/// only — see build_flags.dart's `kPersonalBuild`). Deliberately generic
+/// (plain lat/lon + numeric values, no Open-Meteo-specific types): this
+/// painter has no idea the data came from Open-Meteo, matching the existing
+/// pattern where [ShipMarker]/[TyphoonMarker] are also painter-owned generic
+/// shapes that map_screen.dart fills in from whatever source it likes. The
+/// caller (map_screen.dart) is responsible for resolving each sample to
+/// "value at the current playback time" (e.g. via wave_field.dart's
+/// `interpolateHourlyValue`) *before* handing it to this painter — this
+/// class only ever holds one already-resolved value per field, not a whole
+/// time series.
+class WaveFieldSample {
+  const WaveFieldSample({
+    required this.lat,
+    required this.lon,
+    this.heightM,
+    this.directionDeg,
+  });
+
+  final double lat;
+  final double lon;
+
+  /// Null when the source had no value for this point at the resolved time
+  /// (e.g. playback scrubbed outside the fetched forecast window) — such a
+  /// sample is skipped entirely by [MapPainter._drawWaveField] rather than
+  /// drawn as a 0m blob, which would misleadingly suggest "calm" instead of
+  /// "unknown".
+  final double? heightM;
+
+  /// Direction the waves are coming *from*, degrees (0=N, 90=E) — same
+  /// convention as Open-Meteo's `wave_direction` (see
+  /// open_meteo_marine_fetcher.dart's `OpenMeteoMarinePoint.waveDirectionDeg`
+  /// doc comment). Null skips the flow-streak animation for this point
+  /// (falls back to just the color blob) but doesn't skip the blob itself —
+  /// direction being unknown doesn't mean height is.
+  final double? directionDeg;
+}
+
 /// Draws the simplified plot map: a lat/lon grid, coastline, the ship/
 /// typhoon tracks, and their markers, with a distance line between each ship
 /// and the first (primary) typhoon.
@@ -192,6 +230,20 @@ class MapPainter extends CustomPainter {
   final ui.Image? shipIcon;
   final ui.Image? typhoonIcon;
 
+  /// Wave field overlay samples (2026-07-29, personal build only — always
+  /// empty in a mainline build since only kPersonalBuild-gated code in
+  /// map_screen.dart ever populates this). Drawn right after the grid and
+  /// *before* the coastline (see [paint]) so land polygons naturally paint
+  /// over any blob that lands on land, without this painter needing to know
+  /// anything about land/sea geometry itself.
+  final List<WaveFieldSample> waveField;
+
+  /// Elapsed seconds of a free-running animation clock (map_screen.dart's
+  /// own `Timer.periodic`, independent of the playback timeline — see that
+  /// file's `_waveAnimSeconds` doc comment for why), used only to phase the
+  /// wave-field flow streaks. Not meaningful when [waveField] is empty.
+  final double waveAnimSeconds;
+
   MapPainter({
     this.ships = const [],
     this.coastlinePolygons = const [],
@@ -199,12 +251,15 @@ class MapPainter extends CustomPainter {
     this.zoom = 1.0,
     this.shipIcon,
     this.typhoonIcon,
+    this.waveField = const [],
+    this.waveAnimSeconds = 0,
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     _drawSea(canvas, size);
     _drawGrid(canvas);
+    _drawWaveField(canvas, waveField, waveAnimSeconds);
     _drawCoastline(canvas);
     for (final ship in ships) {
       _drawShipRoute(canvas, ship);
@@ -345,6 +400,124 @@ class MapPainter extends CustomPainter {
       final p2 = MapBounds.toOffset(lat, MapBounds.maxLon);
       canvas.drawLine(p1, p2, gridPaint);
     }
+  }
+
+  // --- Wave field overlay (2026-07-29, personal build only) ---
+  //
+  // A simplified, canvas-only approximation of a Windy-style wave layer:
+  // soft blurred color blobs for height (this method) plus a handful of
+  // short streaks per point drifting in the wave direction (see
+  // _drawWaveStreaks) — not a true smoothly-interpolated gradient field or a
+  // GPU particle system (that would need a custom shader/mesh this simple
+  // CustomPainter setup doesn't have); see docs/completed-log.md's entry for
+  // this feature for the tradeoff discussion with the user. Drawn *before*
+  // _drawCoastline (see [paint]) so land naturally masks any blob sitting
+  // over land, without this method needing its own land/sea awareness.
+  //
+  // [field] and [animSeconds] are always empty/0 in a mainline build (see
+  // [waveField]'s doc comment) — this method itself has no Open-Meteo
+  // dependency, but with an empty list it's a no-op regardless.
+  void _drawWaveField(Canvas canvas, List<WaveFieldSample> field, double animSeconds) {
+    if (field.isEmpty) return;
+
+    // Blobs first (a background wash), streaks on top — matches how Windy
+    // itself layers a color field under its flow-line animation.
+    for (final sample in field) {
+      final height = sample.heightM;
+      if (height == null) continue;
+      final center = MapBounds.toOffset(sample.lat, sample.lon);
+      final paint = Paint()
+        ..color = _waveHeightColor(height).withOpacity(0.55)
+        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, _waveFieldBlurSigma);
+      // Scene-space radius (scales with the map like the coastline/route
+      // lines, not fixed-screen-size like markers) so neighboring blobs
+      // visually merge into a field as the grid gets denser, and spread
+      // apart (revealing individual sample points) when zoomed in far
+      // enough to matter — this is the "field" look the request asked for,
+      // as distinct from a set of discrete point markers.
+      canvas.drawCircle(center, _waveFieldBlobRadius, paint);
+    }
+
+    for (final sample in field) {
+      if (sample.heightM == null || sample.directionDeg == null) continue;
+      _drawWaveStreaks(canvas, sample, animSeconds);
+    }
+  }
+
+  // Tuned by eye, not derived from the grid spacing map_screen.dart actually
+  // requests — see wave_field.dart's buildWaveFieldGridPoints doc comment
+  // for the spacing/point-count tradeoff those values are chosen around.
+  // Revisit together if the two ever drift far enough apart to look wrong
+  // (blobs with visible gaps between them, or overlapping so much detail is
+  // lost).
+  static const double _waveFieldBlobRadius = 26.0;
+  static const double _waveFieldBlurSigma = 14.0;
+
+  // Wave-height → color scale, calm (blue) to rough (red/pink), loosely
+  // modeled on Windy's own wave-layer palette. [heightM] is clamped to
+  // 0-4m — this app's use case (route-vicinity trial, not open-ocean storm
+  // conditions) doesn't need to distinguish anything past "rough" with a
+  // dedicated color stop.
+  static const List<Color> _waveHeightColorStops = [
+    Color(0xFF2E7DFA), // calm
+    Color(0xFF29C7C0),
+    Color(0xFFB23BD9),
+    Color(0xFFE23B6B), // rough
+  ];
+
+  Color _waveHeightColor(double heightM) {
+    final t = (heightM / 4.0).clamp(0.0, 1.0);
+    final scaled = t * (_waveHeightColorStops.length - 1);
+    final i = scaled.floor().clamp(0, _waveHeightColorStops.length - 2);
+    final localT = scaled - i;
+    return Color.lerp(_waveHeightColorStops[i], _waveHeightColorStops[i + 1], localT)!;
+  }
+
+  // A few short white streaks per sample, drifting in the direction the
+  // waves are traveling (`directionDeg` is where they come *from*, per
+  // Open-Meteo's convention — see WaveFieldSample.directionDeg — so travel
+  // direction is directionDeg+180). Purely decorative motion driven by
+  // [animSeconds], a free-running clock independent of the playback
+  // timeline (map_screen.dart's own Timer.periodic) — this is "does the sea
+  // look like it's moving", not a plotted forecast value, so it ticks
+  // continuously regardless of whether the user has pressed Play.
+  //
+  // Fixed-on-screen-size treatment (translate + scale(1/zoom)), same
+  // convention as every other marker in this file — the streaks are meant
+  // to read as a constant visual texture, not something that grows/shrinks
+  // as the user zooms.
+  static const int _waveStreakCount = 3;
+  static const double _waveStreakCycleSeconds = 3.0;
+  static const double _waveStreakTravelPx = 16.0;
+  static const double _waveStreakLengthPx = 6.0;
+
+  void _drawWaveStreaks(Canvas canvas, WaveFieldSample sample, double animSeconds) {
+    final center = MapBounds.toOffset(sample.lat, sample.lon);
+    final travelBearingRad = ((sample.directionDeg! + 180) % 360) * (math.pi / 180);
+    // Local approximation only (not Mercator-corrected): north = screen-up,
+    // east = screen-right. Good enough for a decorative direction cue at
+    // this app's zoom levels; not meant for precise bearing reading (the
+    // numeric readout, if ever added, would use the real value directly).
+    final dir = Offset(math.sin(travelBearingRad), -math.cos(travelBearingRad));
+
+    canvas.save();
+    canvas.translate(center.dx, center.dy);
+    canvas.scale(_invZoom);
+    for (var i = 0; i < _waveStreakCount; i++) {
+      final phase = (animSeconds / _waveStreakCycleSeconds + i / _waveStreakCount) % 1.0;
+      // Fade in over the first 15% of the cycle, hold, fade out over the
+      // last 20% — avoids every streak popping in/out abruptly at the wrap
+      // point, which reads as flickering rather than flowing.
+      final opacity = phase < 0.15 ? phase / 0.15 : (phase > 0.8 ? (1 - phase) / 0.2 : 1.0);
+      final start = dir * (_waveStreakTravelPx * phase);
+      final end = start + dir * _waveStreakLengthPx;
+      final paint = Paint()
+        ..color = Colors.white.withOpacity(0.75 * opacity.clamp(0.0, 1.0))
+        ..strokeWidth = 1.6
+        ..strokeCap = StrokeCap.round;
+      canvas.drawLine(start, end, paint);
+    }
+    canvas.restore();
   }
 
   // Real coastline (Natural Earth 1:50m, clipped to MapBounds — see
@@ -945,7 +1118,25 @@ class MapPainter extends CustomPainter {
         oldDelegate.ships.length != ships.length ||
         _shipsChanged(oldDelegate.ships) ||
         oldDelegate.typhoons.length != typhoons.length ||
-        _typhoonsChanged(oldDelegate.typhoons);
+        _typhoonsChanged(oldDelegate.typhoons) ||
+        oldDelegate.waveField.length != waveField.length ||
+        // Always-empty in a mainline build (waveField.length stays 0), so
+        // this comparison is cheap/dead there too — no per-frame cost added
+        // outside the personal-build trial (2026-07-29's whole point).
+        oldDelegate.waveAnimSeconds != waveAnimSeconds ||
+        _waveFieldChanged(oldDelegate.waveField);
+  }
+
+  bool _waveFieldChanged(List<WaveFieldSample> old) {
+    for (var i = 0; i < waveField.length && i < old.length; i++) {
+      if (old[i].lat != waveField[i].lat ||
+          old[i].lon != waveField[i].lon ||
+          old[i].heightM != waveField[i].heightM ||
+          old[i].directionDeg != waveField[i].directionDeg) {
+        return true;
+      }
+    }
+    return false;
   }
 
   bool _shipsChanged(List<ShipMarker> old) {
