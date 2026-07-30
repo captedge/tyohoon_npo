@@ -33,6 +33,7 @@
 - **配布**：`build_release.bat`（プロジェクトルート）で`flutter build windows --release`＋ポータブルZip（`TyphoonShipTracker.zip`）作成が可能（2026-07-27追加）。展開してexeを起動するだけで動作し、受け取り側にFlutter SDKは不要。
 - **今後の開発方針（仮・2026-07-28合意、変更可能性あり）**：オンライン化・スマホ対応とも同一プロジェクト・同一`main`ブランチで進め、複数の完成形を並行維持する運用は取らない。進める順序は①オンライン化→②モバイル対応。スマホ版UIはデスクトップ版と機能・デザインを極力共通化し横向き固定とする。**ブランチ運用は②モバイル対応（`feature/mobile`）着手時から適用し、①オンライン化はブランチを切らずmain上で直接進める（2026-07-29見直し、経緯は`docs/devlog-architecture-roadmap.md`参照）**。
 - **オンライン化フェーズ①のスコープ（2026-07-29確定）**：JMA自動取得は定期バックグラウンド取得は行わず、既存の「Fetch from JMA」手動ボタンのままとする（個人利用でのデータ消費量への配慮）。代わりに、取得結果の永続化キャッシュ（アプリ再起動後もオフラインで直近の取得結果を表示できるようにする）を実装する。
+- **地方海上予報（VPCY51、①メイン採用済み・2026-07-30実装済み）**：実データ確認済み。Informationダイアログの「Marine Forecast」セクションからDisplay切替・Import・地図上の区域塗り分け表示・オフラインキャッシュが可能（Windows実機確認待ち）。`Becoming`（変化点）への再生スライダー連動は未実装で常にBase値を表示（詳細`docs/completed-log.md`・TASKS.md参照）。
 - **git運用**：`git init`実行、`user.name`/`user.email`をグローバル設定済み（`Capt.Edge` / `captain.edge.management@gmail.com`）、リモート`https://github.com/captedge/tyohoon_npo.git`を`origin`として追加済み（2026-07-25）。直近のpush：2026-07-28、`main`ブランチ、commit `8d7713c`（Passage Plan複数CSV対応・CSVライブラリ機能・サンプル表示廃止・今後の開発方針決定）。詳細は `docs/operation-rules.md` のgit運用ルールに従う（commit/pushはユーザーが「コミットして」と発言したときのみ、`commit.bat`経由）。
 
 ## セッション開始チェックリスト

@@ -23,6 +23,10 @@ import '../models/voyage_plan_entry.dart';
 /// `parseJmaTyphoonXml` on load — this is an offline-use cache of a manual
 /// fetch, not a periodic background fetch (scope decided with the user
 /// 2026-07-29: data-usage concerns rule out auto-fetching on a schedule).
+/// The marine forecast (地方海上予報, VPCY51) layer added 2026-07-30 follows
+/// the same "store raw XML, re-parse on load" pattern via `parseJmaMarineXml`
+/// but is a top-level field (not per-typhoon-slot) since it's one nationwide
+/// layer, not tied to any particular typhoon.
 ///
 /// Everything is stored as a single JSON blob under one SharedPreferences
 /// key — this app has no need for querying individual fields, and a single
@@ -43,11 +47,26 @@ class AppStateStorage {
     required double playbackSpeed,
     required List<VoyagePlanEntry> voyagePlans,
     required List<TyphoonSlotSnapshot> typhoonSlots,
+    required List<String> marineForecastRawXmls,
+    required DateTime? marineForecastFetchedAtJst,
+    required bool marineForecastDisplayEnabled,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final json = <String, dynamic>{
       'shipName': shipName,
       'playbackSpeed': playbackSpeed,
+      // Marine forecast (地方海上予報, VPCY51) offline cache (2026-07-30
+      // addition, mainline feature — see map_screen.dart's Information
+      // dialog "Marine Forecast" section): same "store raw, re-parse on
+      // load" convention as the typhoon slots' jmaRawXml below, except this
+      // isn't per-slot — one nationwide layer, so it's a top-level field
+      // rather than living inside typhoonSlots. [marineForecastRawXmls] can
+      // hold more than one bulletin (multiple regional offices each publish
+      // their own VPCY51 covering different sea areas — see
+      // jma_marine_feed_fetcher.dart's _findVpcy51Urls doc comment).
+      'marineForecastRawXmls': marineForecastRawXmls,
+      'marineForecastFetchedAtJst': marineForecastFetchedAtJst?.toIso8601String(),
+      'marineForecastDisplayEnabled': marineForecastDisplayEnabled,
       'voyagePlans': [
         for (final plan in voyagePlans)
           {
@@ -153,6 +172,16 @@ class AppStateStorage {
         playbackSpeed: (json['playbackSpeed'] as num?)?.toDouble() ?? 0.5,
         voyagePlans: voyagePlans,
         typhoonSlots: typhoonSlots,
+        // Absent for state saved before this feature existed (2026-07-30) —
+        // empty/null/false are the correct "nothing cached yet, layer off"
+        // defaults, same treatment as jmaRawXml above.
+        marineForecastRawXmls: [
+          for (final x in (json['marineForecastRawXmls'] as List? ?? const [])) x as String,
+        ],
+        marineForecastFetchedAtJst: (json['marineForecastFetchedAtJst'] as String?) == null
+            ? null
+            : DateTime.parse(json['marineForecastFetchedAtJst'] as String),
+        marineForecastDisplayEnabled: json['marineForecastDisplayEnabled'] as bool? ?? false,
       );
     } catch (_) {
       // Malformed/unreadable saved state — treat as "nothing saved" rather
@@ -216,10 +245,20 @@ class AppStateSnapshot {
     required this.playbackSpeed,
     required this.voyagePlans,
     required this.typhoonSlots,
+    required this.marineForecastRawXmls,
+    required this.marineForecastFetchedAtJst,
+    required this.marineForecastDisplayEnabled,
   });
 
   final String shipName;
   final double playbackSpeed;
   final List<VoyagePlanEntry> voyagePlans;
   final List<TyphoonSlotSnapshot> typhoonSlots;
+
+  /// Marine forecast (地方海上予報, VPCY51) offline cache — see
+  /// [AppStateStorage.save]'s doc comment on the same fields for why this
+  /// lives at the top level rather than inside [TyphoonSlotSnapshot].
+  final List<String> marineForecastRawXmls;
+  final DateTime? marineForecastFetchedAtJst;
+  final bool marineForecastDisplayEnabled;
 }

@@ -23,6 +23,7 @@ import '../utils/jtwc_feed_fetcher.dart';
 import '../utils/jtwc_parser.dart';
 import '../utils/map_bounds.dart';
 import '../utils/marine_area_codes.dart';
+import '../utils/marine_areas.dart';
 import '../utils/marker_icons.dart';
 import '../utils/open_meteo_marine_fetcher.dart';
 import '../utils/voyage_plan.dart';
@@ -223,6 +224,81 @@ class _MapScreenState extends State<MapScreen> {
 
   CoastlineData _coastline = CoastlineData.empty;
 
+  // --- Marine forecast (地方海上予報, VPCY51) area-fill layer — mainline
+  // feature, 2026-07-30 ---
+  //
+  // Production replacement for the "Marine forecast (debug)" text-only
+  // dialog (_showMarineForecastDebugDialog, kept as-is for raw verification)
+  // once real-data fetches confirmed jma_marine_xml_parser.dart reads actual
+  // bulletins correctly. Unlike the typhoon slots, this is one nationwide
+  // layer, not per-slot — see AppStateStorage's top-level (not
+  // TyphoonSlotSnapshot) marineForecast* fields.
+  //
+  // Bundled area boundary polygons (marine_areas.dart), loaded once at
+  // startup — same "empty until loaded" pattern as _coastline above.
+  MarineAreaData _marineAreas = MarineAreaData.empty;
+
+  // Whether the area-fill layer is currently drawn (Information dialog's
+  // "Marine Forecast" Display checkbox). Off by default — nothing fetched
+  // yet on a fresh launch, same reasoning as the typhoon slots' jmaDisplayEnabled
+  // default.
+  bool _marineForecastDisplayEnabled = false;
+
+  // Offline cache of the last successful "Import from JMA" (Marine
+  // Forecast) press: raw bulletin XML text(s) — more than one when multiple
+  // regional offices each published their own VPCY51 covering different sea
+  // areas (see jma_marine_feed_fetcher.dart's _findVpcy51Urls doc comment) —
+  // re-parsed on load/fetch, same "store raw, re-parse" convention as
+  // _TyphoonSlot.jmaRawXml.
+  List<String> _marineForecastRawXmls = [];
+  DateTime? _marineForecastFetchedAtJst;
+
+  // Parsed-and-merged cache derived from _marineForecastRawXmls (rebuilt
+  // whenever that list changes — fetch success or _restoreState — not
+  // reparsed on every paint/build) keyed by VPCY51 Area/Code, so
+  // _marineForecastAreaPolygons below is a cheap lookup rather than
+  // re-running parseJmaMarineXml every frame.
+  Map<String, MarineWaveForecast> _marineForecastByArea = {};
+
+  // Re-parses [rawXmls] (see _marineForecastByArea's doc comment) into a
+  // map keyed by area code, last bulletin wins for a given code (areas
+  // shouldn't actually overlap between offices, but a Map naturally handles
+  // it gracefully either way). Bulletins that fail to re-parse are skipped
+  // rather than thrown (same fail-safe convention _restoreState already uses
+  // for the typhoon slots' cached jmaRawXml — protects against a
+  // hypothetical future parser change making an already-cached bulletin no
+  // longer parse).
+  Map<String, MarineWaveForecast> _parseMarineForecastByArea(List<String> rawXmls) {
+    final map = <String, MarineWaveForecast>{};
+    for (final xml in rawXmls) {
+      try {
+        for (final forecast in parseJmaMarineXml(xml)) {
+          map[forecast.areaCode] = forecast;
+        }
+      } on JmaMarineXmlParseException {
+        continue;
+      }
+    }
+    return map;
+  }
+
+  // Resolves _marineForecastByArea down to what MapPainter actually needs:
+  // this area's bundled boundary polygon(s) plus its Base wave height (see
+  // MarineForecastAreaPolygon.heightM doc comment for why Base rather than
+  // a slider-time-resolved value). Empty whenever the layer is off, so
+  // toggling Display is a cheap no-render rather than needing to also clear
+  // the underlying fetched data.
+  List<MarineForecastAreaPolygon> get _marineForecastAreaPolygons {
+    if (!_marineForecastDisplayEnabled) return const [];
+    final result = <MarineForecastAreaPolygon>[];
+    for (final entry in _marineForecastByArea.entries) {
+      final polygons = _marineAreas.forCode(entry.key);
+      if (polygons.isEmpty) continue;
+      result.add(MarineForecastAreaPolygon(id: entry.key, polygons: polygons, heightM: entry.value.baseHeightM));
+    }
+    return result;
+  }
+
   // Ship/typhoon marker icon images (2026-08-xx request: replace the
   // placeholder triangle/circle with assets/ship_icon01.png and
   // assets/typhoon_icon01.png). Null until loaded — MapPainter falls back
@@ -299,6 +375,14 @@ class _MapScreenState extends State<MapScreen> {
   // distance readout for that source — see map_painter.dart.
   static const Color _jtwcColor = Color(0xFFE53935); // red
   static const Color _jmaColor = Color(0xFFEF6C00); // orange
+
+  // Accent color for the Information dialog's Marine Forecast (VPCY51)
+  // section (Display checkbox label, Import button icon/label, status text)
+  // — distinct from _jtwcColor/_jmaColor since this isn't a typhoon source.
+  // Not related to MapPainter's own per-height fill color scale
+  // (_marineForecastColor in map_painter.dart) — this is a single fixed UI
+  // accent, not a value-dependent one.
+  static const Color _marineForecastAccentColor = Color(0xFF00695C); // teal
 
   // Builds one [TyphoonMarker] from an already-resolved track — shared by
   // both the JTWC and JMA paths below, which differ only in how they build
@@ -400,6 +484,9 @@ class _MapScreenState extends State<MapScreen> {
     CoastlineData.load().then((data) {
       if (mounted) setState(() => _coastline = data);
     });
+    MarineAreaData.load().then((data) {
+      if (mounted) setState(() => _marineAreas = data);
+    });
     loadUiImage('assets/ship_icon01.png').then((image) {
       if (mounted) setState(() => _shipIcon = image);
     });
@@ -488,6 +575,13 @@ class _MapScreenState extends State<MapScreen> {
         _startTime = restoredStart;
         _offsetHours = 0;
       }
+      // Marine forecast (地方海上予報) offline cache (2026-07-30 addition) —
+      // same re-parse-on-load treatment as the typhoon slots' jmaRawXml
+      // above, just at the top level rather than per-slot.
+      _marineForecastRawXmls = snapshot.marineForecastRawXmls;
+      _marineForecastFetchedAtJst = snapshot.marineForecastFetchedAtJst;
+      _marineForecastDisplayEnabled = snapshot.marineForecastDisplayEnabled;
+      _marineForecastByArea = _parseMarineForecastByArea(_marineForecastRawXmls);
     });
   }
 
@@ -512,6 +606,9 @@ class _MapScreenState extends State<MapScreen> {
             jmaRingsEnabled: slot.jmaRingsEnabled,
           ),
       ],
+      marineForecastRawXmls: _marineForecastRawXmls,
+      marineForecastFetchedAtJst: _marineForecastFetchedAtJst,
+      marineForecastDisplayEnabled: _marineForecastDisplayEnabled,
     );
   }
 
@@ -874,6 +971,17 @@ class _MapScreenState extends State<MapScreen> {
     final jtwcFetching = List<bool>.filled(_typhoonSlots.length, false);
     final jtwcFetchError = List<String?>.filled(_typhoonSlots.length, null);
 
+    // Marine Forecast (地方海上予報, VPCY51) dialog-local "draft" state
+    // (2026-07-30 addition) — same pattern as the JMA typhoon fetch state
+    // above: seeded from whatever's already cached/set so reopening this
+    // dialog doesn't look like the previous fetch/Display setting was lost,
+    // only written back into the real state fields on Save.
+    var marineForecastDisplayLocal = _marineForecastDisplayEnabled;
+    var marineForecastRawXmlsLocal = List<String>.from(_marineForecastRawXmls);
+    var marineForecastFetchedAtLocal = _marineForecastFetchedAtJst;
+    var marineForecastFetching = false;
+    String? marineForecastError;
+
     // "Import All" state (2026-07-29 addition): unlike the per-slot fetch
     // state above (one bool/error per Typhoon block), these two buttons are
     // not tied to a particular slot — each press fills as many of slots
@@ -1019,6 +1127,60 @@ class _MapScreenState extends State<MapScreen> {
               }
             }
 
+            // Marine Forecast fetch (2026-07-30 addition): fetches every
+            // currently-published VPCY51 (地方海上予報) bulletin (see
+            // jma_marine_feed_fetcher.dart's fetchLatestMarineForecast — one
+            // per regional office, when more than one office has a bulletin
+            // out at once) and keeps only the ones that parsed cleanly.
+            // Unlike fetchJma above, this isn't per-slot — one press updates
+            // the single nationwide layer, so it has its own status
+            // variable rather than a per-index array.
+            Future<void> fetchMarineForecast() async {
+              setDialogState(() {
+                marineForecastFetching = true;
+                marineForecastError = null;
+              });
+              try {
+                final fetched = await fetchLatestMarineForecast();
+                if (!dialogOpen) return;
+                final validBulletins = fetched.bulletins.where((b) => b.parseError == null).toList();
+                if (validBulletins.isEmpty) {
+                  // Two different reasons look the same here — nothing to
+                  // show either way — but worth telling apart in the message:
+                  // "nothing published right now" (normal outside the
+                  // 6/12/18/24 JST issue windows) vs. "found bulletins but
+                  // every one failed to parse" (a real problem — same class
+                  // of surprise the "Marine forecast (debug)" dialog exists
+                  // to catch in detail, see _showMarineForecastDebugDialog).
+                  // Leaves marineForecastRawXmlsLocal/FetchedAtLocal
+                  // untouched either way — same "don't wipe out what's
+                  // already there" principle as fetchJma's isEmpty branch.
+                  setDialogState(() {
+                    marineForecastFetching = false;
+                    marineForecastError = fetched.bulletins.isEmpty
+                        ? '現在、地方海上予報の発表が見つかりませんでした（6/12/18/24時JST前後に再度お試しください）。'
+                        : '取得はできましたが解析に失敗しました。詳細は「Marine forecast (debug)」で確認してください。';
+                  });
+                  return;
+                }
+                setDialogState(() {
+                  marineForecastFetching = false;
+                  marineForecastRawXmlsLocal = [for (final b in validBulletins) b.rawXml];
+                  marineForecastFetchedAtLocal = DateTime.now();
+                  // Auto-enable Display on a successful fetch — same
+                  // reasoning as fetchJma/fetchJtwc above.
+                  marineForecastDisplayLocal = true;
+                  marineForecastError = null;
+                });
+              } catch (e) {
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  marineForecastFetching = false;
+                  marineForecastError = '取得に失敗しました: $e';
+                });
+              }
+            }
+
             // "Import All" (2026-07-29 addition, TASKS.md「複数台風が同時に
             // 発表されている場合の対応」): finds every currently-active
             // typhoon for a source (up to 3 — see fetchActiveJmaTyphoons/
@@ -1122,6 +1284,64 @@ class _MapScreenState extends State<MapScreen> {
                           isDense: true,
                         ),
                       ),
+                      const Divider(height: 28),
+                      // Marine Forecast (地方海上予報, VPCY51) section
+                      // (2026-07-30 addition) — production UI replacing the
+                      // "Marine forecast (debug)" text-only verification
+                      // dialog (kept as a separate AppBar button for raw
+                      // inspection) now that real-data fetches have
+                      // confirmed jma_marine_xml_parser.dart reads actual
+                      // bulletins correctly. One nationwide layer, not
+                      // per-typhoon-slot — see fetchMarineForecast above.
+                      const Text('Marine Forecast (JMA regional sea areas)',
+                          style: TextStyle(fontWeight: FontWeight.bold)),
+                      const SizedBox(height: 4),
+                      Text(
+                        '地方海上予報（波高）を地図上に区域ごと色分け表示します。'
+                        '表示範囲南側（フィリピン近海）は予報区の対象外のため表示されません。',
+                        style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                      ),
+                      const SizedBox(height: 6),
+                      Row(
+                        children: [
+                          displayCheckbox(
+                            'Display',
+                            _marineForecastAccentColor,
+                            marineForecastDisplayLocal,
+                            (v) => setDialogState(() => marineForecastDisplayLocal = v ?? false),
+                          ),
+                          const SizedBox(width: 8),
+                          OutlinedButton.icon(
+                            onPressed: marineForecastFetching ? null : fetchMarineForecast,
+                            icon: marineForecastFetching
+                                ? const SizedBox(
+                                    width: 14,
+                                    height: 14,
+                                    child: CircularProgressIndicator(strokeWidth: 2),
+                                  )
+                                : Icon(Icons.cloud_download, size: 16, color: _marineForecastAccentColor),
+                            label: Text(marineForecastFetching ? 'Importing...' : 'Import from JMA'),
+                          ),
+                        ],
+                      ),
+                      if (marineForecastError != null) ...[
+                        const SizedBox(height: 4),
+                        Text(marineForecastError!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+                      ],
+                      if (marineForecastRawXmlsLocal.isNotEmpty) ...[
+                        const SizedBox(height: 4),
+                        Text(
+                          '${marineForecastRawXmlsLocal.length} bulletin(s) loaded.',
+                          style: TextStyle(fontSize: 11, color: _marineForecastAccentColor),
+                        ),
+                      ],
+                      if (marineForecastFetchedAtLocal != null) ...[
+                        const SizedBox(height: 2),
+                        Text(
+                          'Cached: ${_formatDateTime(marineForecastFetchedAtLocal!)}',
+                          style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                        ),
+                      ],
                       const Divider(height: 28),
                       // "Import All" (2026-07-29 addition, labeled "Import"
                       // rather than "Fetch" per 2026-07-29 user request —
@@ -1446,6 +1666,14 @@ class _MapScreenState extends State<MapScreen> {
                         _typhoonSlots[i].jmaFetchedAtJst = jmaFetchedAtLocal[i];
                         _typhoonSlots[i].jmaDisplayEnabled = jmaDisplayLocal[i];
                       }
+                      // Marine Forecast (2026-07-30 addition) — write back
+                      // the dialog-local draft state (same pattern as the
+                      // typhoon slots above) and rebuild the parsed-by-area
+                      // cache _marineForecastAreaPolygons reads from.
+                      _marineForecastDisplayEnabled = marineForecastDisplayLocal;
+                      _marineForecastRawXmls = marineForecastRawXmlsLocal;
+                      _marineForecastFetchedAtJst = marineForecastFetchedAtLocal;
+                      _marineForecastByArea = _parseMarineForecastByArea(marineForecastRawXmlsLocal);
                     });
                     _saveState();
                     dialogOpen = false;
@@ -2993,6 +3221,7 @@ class _MapScreenState extends State<MapScreen> {
                             // build_flags.dart's kPersonalBuild.
                             waveField: _currentWaveFieldSamples,
                             waveAnimSeconds: _waveAnimSeconds,
+                            marineForecastAreas: _marineForecastAreaPolygons,
                           ),
                         ),
                       ),
