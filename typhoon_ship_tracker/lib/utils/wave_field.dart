@@ -4,12 +4,20 @@ import 'open_meteo_marine_fetcher.dart';
 /// caller of this file's functions must already be behind that gate, same
 /// as open_meteo_marine_fetcher.dart itself). Supports the "wave field" map
 /// overlay (2026-07-29 request: "地図上に波高を色分け表示、Windy風のアニメー
-/// ション、航路周辺のみ") — a grid of Open-Meteo sample points covering the
-/// area around the active route(s), rendered by MapPainter's
-/// `WaveFieldSample`/`_drawWaveField` (map_painter.dart doesn't import this
-/// file or open_meteo_marine_fetcher.dart at all — it only knows about the
-/// generic `WaveFieldSample` type, so the actual data-source/licensing
-/// specifics stay confined to this personal-build-only layer).
+/// ション") — a grid of Open-Meteo sample points covering an area of the
+/// map, rendered by MapPainter's `WaveFieldSample`/`_drawWaveField`
+/// (map_painter.dart doesn't import this file or
+/// open_meteo_marine_fetcher.dart at all — it only knows about the generic
+/// `WaveFieldSample` type, so the actual data-source/licensing specifics
+/// stay confined to this personal-build-only layer).
+///
+/// Which area that grid covers has changed once: initially "route vicinity
+/// only" (2026-07-29), then changed to "whatever's currently visible in the
+/// map viewport, refetched as the user pans/zooms" (2026-07-30) per the
+/// decision in docs/devlog-online-xml.md "波の場オーバーレイの表示範囲方式"
+/// — see map_screen.dart's `_fetchWaveFieldGrid`/`_visibleLatLonBounds` for
+/// where that box actually comes from; this file stays agnostic to it and
+/// just turns whatever box it's given into a grid.
 
 /// One sampled grid point, carrying the full hourly series so the caller can
 /// re-interpolate at whatever playback time the user has the slider on
@@ -27,9 +35,26 @@ class WaveFieldPoint {
 /// padding the caller wants — this function doesn't add its own), spaced
 /// [spacingDeg] apart. If that spacing would produce more than [maxPoints]
 /// points, the spacing is coarsened (multiplied up) just enough to fit
-/// within the cap — kept deliberately small (2026-07-29 "航路周辺のみ"
-/// decision) to bound both the single batched Open-Meteo request's size and
-/// how many blobs/streaks the map painter draws per frame.
+/// within the cap, so the grid never exceeds [maxPoints] regardless of how
+/// large the requested box is — this matters now that the box is the
+/// current map viewport (2026-07-30) rather than a fixed route-vicinity
+/// box: a zoomed-out viewport can span the app's entire N5-50/E85-170
+/// display range.
+///
+/// [maxPoints]' default (900, raised from an original 120) reflects
+/// 2026-07-30 user feedback that the full-viewport grid ("網羅されたが...
+/// 波浪情報として使えないレベル") was too sparse to be useful compared to
+/// the original route-vicinity-only box's density. Request-URL size is
+/// *not* a reason to keep this small — [fetchOpenMeteoMarineGrid] in
+/// open_meteo_marine_fetcher.dart splits [points] into several small HTTP
+/// requests regardless of how large [maxPoints] is (a single request built
+/// from the full 900 points hit HTTP 414 "URI Too Long" in practice before
+/// that batching was added — see that function's doc comment). The
+/// remaining real ceiling on [maxPoints] is render cost: more points means
+/// more blobs/streaks for MapPainter to draw every animation frame, which
+/// depends on how the map actually performs at a given point count on real
+/// hardware, not on anything this function can measure itself (Windows
+/// real-machine check needed, see TASKS.md).
 ///
 /// Returns an empty list if the box is degenerate (max <= min on either
 /// axis).
@@ -39,7 +64,7 @@ List<({double lat, double lon})> buildWaveFieldGridPoints({
   required double minLon,
   required double maxLon,
   double spacingDeg = 0.4,
-  int maxPoints = 120,
+  int maxPoints = 900,
 }) {
   if (maxLat <= minLat || maxLon <= minLon) return const [];
 
@@ -68,12 +93,14 @@ List<({double lat, double lon})> buildWaveFieldGridPoints({
   }
 
   // The coarsening loop above bails out once `spacing > 10` even if
-  // cols*rows is still over maxPoints (Agent review, 2026-07-29) — not
-  // reachable with this app's current call site (route-vicinity padding is
-  // always well above spacingDeg, and the full-map-extent worst case still
-  // stays under the default maxPoints), but truncating here makes the cap
-  // an actual guarantee rather than "true for now" if a future caller ever
-  // passes a very large box with a very small maxPoints.
+  // cols*rows is still over maxPoints (Agent review, 2026-07-29). With the
+  // current default maxPoints (900) this genuinely can be reached at the
+  // full N5-50/E85-170 viewport extent (85x45 degrees needs spacing ~2.06
+  // to land at 900 points, well under the `spacing > 10` bailout — so in
+  // practice the coarsening loop itself already satisfies the cap there),
+  // but this truncation stays as a hard backstop guarantee for any future
+  // caller that passes a very large box with a much smaller maxPoints,
+  // where the `spacing > 10` bailout could otherwise be hit first.
   if (points.length > maxPoints) return points.take(maxPoints).toList();
   return points;
 }

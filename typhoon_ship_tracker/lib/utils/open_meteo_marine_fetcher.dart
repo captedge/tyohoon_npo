@@ -232,27 +232,52 @@ Future<OpenMeteoMarineResult> fetchOpenMeteoMarine({
   return _parseSingleLocationResult(decoded, fallbackLatitude: latitude, fallbackLongitude: longitude);
 }
 
+/// Batch size for [fetchOpenMeteoMarineGrid]'s chunked requests (below).
+///
+/// **Hit in practice, 2026-07-30**: a single request built from
+/// [buildWaveFieldGridPoints]' new 900-point cap (see that function's doc
+/// comment in wave_field.dart) failed with HTTP 414 "URI Too Long" — the
+/// comma-separated `latitude`/`longitude` query values for 900 points
+/// produced a URL far past whatever length limit Open-Meteo's server (or a
+/// proxy in front of it) enforces. Open-Meteo's own docs don't actually
+/// document a URL-length ceiling (only a "up to 1000 locations" figure that
+/// evidently isn't the binding constraint in practice), so rather than
+/// guessing at a single safe point count for one request, [points] is split
+/// into batches of at most this many locations, fetched as separate
+/// concurrent HTTP requests and merged — keeping every individual request's
+/// URL comfortably short (well under 2,000 characters even at 100 points)
+/// regardless of how large the overall grid (`maxPoints` in
+/// wave_field.dart) grows in the future. 100 is a conservative round number
+/// chosen with a wide safety margin below the observed failure, not a
+/// value derived from a documented limit.
+const _maxLocationsPerRequest = 100;
+
 /// Fetches the same hourly wave forecast as [fetchOpenMeteoMarine], but for
-/// many points in a single HTTP request — Open-Meteo's multi-location
-/// support (API docs: "Multiple coordinates can be comma separated... To
-/// return data for multiple locations the JSON output changes to a list of
-/// structures"). Used to render a wave *field* over an area (2026-07-29
-/// request: "地図上に波高を色分け表示、Windy風のアニメーション"; see
-/// wave_field.dart for how [points] is generated — kept deliberately small,
-/// "route vicinity only" per that request, both to bound this request's URL
-/// length and to bound how many blobs/streaks the map painter ends up
-/// drawing).
+/// many points — batched into one or more HTTP requests of at most
+/// [_maxLocationsPerRequest] locations each (see that constant's doc
+/// comment for why), fired concurrently and merged. Used to render a wave
+/// *field* over an area (2026-07-29 request: "地図上に波高を色分け表示、
+/// Windy風のアニメーション"; see wave_field.dart for how [points] is
+/// generated and capped).
 ///
 /// Each returned [OpenMeteoMarineResult] carries its own resolved
 /// latitude/longitude (the actual model grid-cell center — see that field's
-/// doc comment), so callers should plot using those rather than assuming the
-/// *n*-th result corresponds positionally to the *n*-th input [points]
-/// entry — this function doesn't assert an order guarantee from the API.
+/// doc comment), so callers should plot using those rather than assuming
+/// the *n*-th result corresponds positionally to the *n*-th input [points]
+/// entry — this function doesn't assert an order guarantee from the API,
+/// and batching makes that doubly true (results across batches are
+/// concatenated in batch order, but within Dart's `Future.wait` the
+/// individual HTTP responses themselves can still complete/parse in any
+/// order relative to each other before being reassembled).
 ///
-/// Returns an empty list (not an error) for an empty [points] input, without
-/// making a request. Throws [OpenMeteoFetchException] for network/HTTP
-/// failures, a non-200 response, or a response that isn't the expected JSON
-/// array of per-location objects.
+/// Returns an empty list (not an error) for an empty [points] input,
+/// without making a request. All-or-nothing on failure: if any one batch's
+/// request throws (network/HTTP failure, non-200 response, or an
+/// unexpected response shape), the whole call throws and no partial grid is
+/// returned — simpler to reason about than a map silently missing whatever
+/// patch of the grid one failed batch would have covered, at the cost of
+/// occasionally discarding several batches' worth of otherwise-good data
+/// alongside the one that failed.
 Future<List<OpenMeteoMarineResult>> fetchOpenMeteoMarineGrid({
   required List<({double lat, double lon})> points,
   int forecastDays = 2,
@@ -263,15 +288,37 @@ Future<List<OpenMeteoMarineResult>> fetchOpenMeteoMarineGrid({
     'code paths (see build_flags.dart) — a caller outside that gate is a bug.',
   );
   if (points.isEmpty) return const [];
-  // A single point produces a comma-free latitude/longitude query param,
-  // which Open-Meteo's docs describe as the trigger for the *single-object*
-  // response shape (comma-separated values are what switches it to the
-  // array-of-structures shape) — so `decoded is! List` below would
-  // incorrectly reject a genuine 1-point request (Agent review, 2026-07-29).
-  // Not reachable from this app's current call site (wave_field.dart's grid
-  // builder always returns several points for any real bounding box), but
-  // routed through the already-correct single-point path here rather than
-  // left as a trap for a future caller.
+
+  final batches = <List<({double lat, double lon})>>[];
+  for (var i = 0; i < points.length; i += _maxLocationsPerRequest) {
+    final end = i + _maxLocationsPerRequest < points.length ? i + _maxLocationsPerRequest : points.length;
+    batches.add(points.sublist(i, end));
+  }
+
+  final batchResults = await Future.wait(
+    batches.map((batch) => _fetchOpenMeteoMarineBatch(batch, forecastDays: forecastDays)),
+  );
+  return [for (final batch in batchResults) ...batch];
+}
+
+/// Fetches one batch (at most [_maxLocationsPerRequest] locations, per
+/// [fetchOpenMeteoMarineGrid]'s chunking) as a single HTTP request.
+///
+/// A batch of exactly one point is routed through [fetchOpenMeteoMarine]
+/// instead of building a multi-location URL here: a single point produces
+/// a comma-free latitude/longitude query value, which Open-Meteo's docs
+/// describe as the trigger for the *single-object* response shape
+/// (comma-separated values are what switches it to the array-of-structures
+/// shape) — so parsing this batch as an array would incorrectly reject a
+/// genuine 1-point batch (Agent review, 2026-07-29; this exact edge case
+/// was originally guarded in [fetchOpenMeteoMarineGrid] itself before the
+/// 2026-07-30 batching change moved it here, since a batch this small is
+/// now reachable in practice whenever [points]' total length isn't a clean
+/// multiple of [_maxLocationsPerRequest]).
+Future<List<OpenMeteoMarineResult>> _fetchOpenMeteoMarineBatch(
+  List<({double lat, double lon})> points, {
+  required int forecastDays,
+}) async {
   if (points.length == 1) {
     final only = points.single;
     return [await fetchOpenMeteoMarine(latitude: only.lat, longitude: only.lon, forecastDays: forecastDays)];

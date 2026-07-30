@@ -182,6 +182,25 @@ class _MapScreenState extends State<MapScreen> {
   double _waveAnimSeconds = 0;
   Timer? _waveAnimTimer;
 
+  // Debounces re-fetching the grid after the visible map viewport changes
+  // (pan/zoom) — see _onViewportChangedForWaveField below. Replaces the
+  // original "route vicinity" fixed box with a "whatever's currently on
+  // screen" box (2026-07-30, per the 2026-07-29 decision recorded in
+  // docs/devlog-online-xml.md "波の場オーバーレイの表示範囲方式": a fixed
+  // full-area grid was rejected for data volume/render cost/coarse-grid
+  // reasons, and route-vicinity-only didn't let the user pan the map to see
+  // the wave field anywhere else).
+  Timer? _waveFieldViewportDebounce;
+
+  // Bumped every time a new wave field fetch starts. A fetch that resolves
+  // after a newer one has already started discards its own result instead
+  // of applying it (see _fetchWaveFieldGrid) — with the viewport able to
+  // trigger a fresh fetch every _waveFieldViewportDebounceMs while an
+  // earlier request is still in flight (slow network, several pans in a
+  // row), plain network completion order isn't guaranteed to match request
+  // order, so this stops a stale response from overwriting fresher data.
+  int _waveFieldFetchGeneration = 0;
+
   // Playback speed as a multiplier of the original fixed-speed behavior
   // (1.0 = "1 simulated hour per 200ms tick", which is what this screen
   // always did before). 2026-07-28 request: default to 50% (half as fast
@@ -506,7 +525,13 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _playTimer?.cancel();
     _waveAnimTimer?.cancel();
+    _waveFieldViewportDebounce?.cancel();
     _transformationController.removeListener(_syncFromController);
+    // Safe even if the overlay was off (and this listener was never added)
+    // — ChangeNotifier.removeListener is a no-op for a listener it doesn't
+    // have. Kept unconditional here rather than tracking "was it added" so
+    // disposing mid-overlay-on can't leak the listener.
+    _transformationController.removeListener(_onViewportChangedForWaveField);
     _transformationController.dispose();
     super.dispose();
   }
@@ -2083,8 +2108,10 @@ class _MapScreenState extends State<MapScreen> {
   //
   // Follow-up to the Open-Meteo text-only trial dialog above: once that
   // confirmed real wave data could be fetched, the request became "show it
-  // on the map, color-coded, Windy-style animation, route vicinity only".
-  // See wave_field.dart's top-of-file doc comment and
+  // on the map, color-coded, Windy-style animation". Initially fetched
+  // "route vicinity only"; changed 2026-07-30 to follow the current map
+  // viewport instead (pan/zoom triggers a debounced re-fetch) — see
+  // wave_field.dart's top-of-file doc comment for why. See also
   // MapPainter._drawWaveField for the rest of the design.
 
   // Toggles the overlay on/off (AppBar button in build(), kPersonalBuild
@@ -2096,49 +2123,120 @@ class _MapScreenState extends State<MapScreen> {
   // display, so slightly-stale cached data on toggle-back-on is an
   // acceptable tradeoff for not re-hitting the API every time.
   void _setWaveFieldEnabled(bool enabled) {
+    // Defensive early-out (Agent review, 2026-07-30): the only caller today
+    // is the AppBar toggle button, which is disabled while
+    // _waveFieldLoading — so in practice this is never called with the same
+    // value twice in a row, which would otherwise double-register the
+    // viewport listener below (Listenable doesn't dedupe addListener calls).
+    // Kept here so that invariant doesn't have to keep holding if another
+    // call site (e.g. a keyboard shortcut) is ever added.
+    if (enabled == _waveFieldEnabled) return;
     setState(() => _waveFieldEnabled = enabled);
     if (enabled) {
       _waveAnimTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
         if (!mounted) return;
         setState(() => _waveAnimSeconds += 0.1);
       });
+      // Registered only while the overlay is on (mirrors _waveAnimTimer's
+      // own "don't pay for what you're not showing" pattern above) — a user
+      // who never turns the overlay on in a personal build never pays the
+      // per-pan/zoom listener cost.
+      _transformationController.addListener(_onViewportChangedForWaveField);
       if (_waveFieldGrid == null && !_waveFieldLoading) {
+        // Not awaited: this screen doesn't block the toggle UI on the
+        // fetch — _waveFieldLoading (set synchronously at the top of
+        // _fetchWaveFieldGrid) drives the button's spinner/disabled state
+        // instead, and the method guards its own `mounted`/generation
+        // checks before touching state, so nothing here needs to wait on it.
         _fetchWaveFieldGrid();
       }
     } else {
       _waveAnimTimer?.cancel();
       _waveAnimTimer = null;
+      _transformationController.removeListener(_onViewportChangedForWaveField);
+      _waveFieldViewportDebounce?.cancel();
+      _waveFieldViewportDebounce = null;
+      // Defensive reset (wrapped in setState since this feeds the AppBar
+      // button's spinner/disabled state) to match the "never disabled while
+      // loading" invariant above even if a future disable path is added
+      // while a fetch happens to be in flight.
+      if (_waveFieldLoading) setState(() => _waveFieldLoading = false);
     }
   }
 
-  // Computes the sample grid's bounding box — the active route(s)' own
-  // bounding box padded by _waveFieldRoutePaddingDeg ("route vicinity",
-  // 2026-07-29 decision), or a small fixed box around MapBounds' default
-  // center if no route is registered yet — then fetches wave data for it
-  // via Open-Meteo's batched multi-location endpoint.
-  static const double _waveFieldRoutePaddingDeg = 1.0;
+  // Fires on every change to _transformationController (drag, pinch, wheel,
+  // +/- buttons/slider, or the initial view-fit) while the overlay is on.
+  // Debounced rather than fetching on every frame of an in-progress
+  // drag/pinch — Open-Meteo is only hit after the view has been still for
+  // _waveFieldViewportDebounceMs, the same "settle before fetching" pattern
+  // as a search-as-you-type box.
+  static const _waveFieldViewportDebounceMs = 700;
+
+  void _onViewportChangedForWaveField() {
+    _waveFieldViewportDebounce?.cancel();
+    _waveFieldViewportDebounce = Timer(
+      const Duration(milliseconds: _waveFieldViewportDebounceMs),
+      () {
+        if (!mounted || !_waveFieldEnabled) return;
+        _fetchWaveFieldGrid();
+      },
+    );
+  }
+
+  // Computes the lat/lon box currently visible in the map viewport, by
+  // inverse-transforming the viewport's top-left/bottom-right corners
+  // through the same controller matrix _latLonAtViewportPoint already uses
+  // for the cursor lat/lon readout. The app never rotates the map (see
+  // _applyTransform's doc comment — always "translate then uniform scale"),
+  // so those two corners alone fully determine the box; the other two
+  // corners don't add information. Returns null if the viewport size isn't
+  // known yet (before first layout).
+  ({double minLat, double maxLat, double minLon, double maxLon})? _visibleLatLonBounds() {
+    if (_viewportSize.width <= 0 || _viewportSize.height <= 0) return null;
+    final topLeft = _latLonAtViewportPoint(Offset.zero);
+    final bottomRight = _latLonAtViewportPoint(Offset(_viewportSize.width, _viewportSize.height));
+    if (topLeft == null || bottomRight == null) return null;
+    return (minLat: bottomRight.lat, maxLat: topLeft.lat, minLon: topLeft.lon, maxLon: bottomRight.lon);
+  }
+
+  // Computes the sample grid's bounding box from the map's current visible
+  // viewport (2026-07-30, replacing the original "route vicinity" box — see
+  // _waveFieldViewportDebounce's doc comment above for why), padded by
+  // _waveFieldViewportPaddingFraction of the visible box's *own* size on
+  // each side (a fraction rather than a fixed degree amount, since the
+  // visible box's size varies hugely with zoom — under a degree zoomed
+  // all the way in, the whole N5-50/E85-170 range zoomed all the way out)
+  // so a small pan shows already-fetched data at the new edge instead of an
+  // immediate blank strip while the debounced re-fetch is still pending.
+  // Falls back to a small fixed box around MapBounds' default center if the
+  // viewport size isn't known yet (first frame, before layout) — then
+  // fetches wave data for the resulting box via Open-Meteo's batched
+  // multi-location endpoint.
+  static const double _waveFieldViewportPaddingFraction = 0.15;
   static const double _waveFieldDefaultHalfBoxDeg = 3.0;
 
   Future<void> _fetchWaveFieldGrid() async {
+    final myGeneration = ++_waveFieldFetchGeneration;
     setState(() => _waveFieldLoading = true);
 
-    final tracks = _activeShipTracks;
     double minLat, maxLat, minLon, maxLon;
-    if (tracks.isNotEmpty) {
-      final allPoints = [for (final t in tracks) ...t.track];
-      minLat = allPoints.map((p) => p.latitude).reduce(math.min) - _waveFieldRoutePaddingDeg;
-      maxLat = allPoints.map((p) => p.latitude).reduce(math.max) + _waveFieldRoutePaddingDeg;
-      minLon = allPoints.map((p) => p.longitude).reduce(math.min) - _waveFieldRoutePaddingDeg;
-      maxLon = allPoints.map((p) => p.longitude).reduce(math.max) + _waveFieldRoutePaddingDeg;
+    final visible = _visibleLatLonBounds();
+    if (visible != null) {
+      final latPad = (visible.maxLat - visible.minLat) * _waveFieldViewportPaddingFraction;
+      final lonPad = (visible.maxLon - visible.minLon) * _waveFieldViewportPaddingFraction;
+      minLat = visible.minLat - latPad;
+      maxLat = visible.maxLat + latPad;
+      minLon = visible.minLon - lonPad;
+      maxLon = visible.maxLon + lonPad;
     } else {
       minLat = MapBounds.defaultCenterLat - _waveFieldDefaultHalfBoxDeg;
       maxLat = MapBounds.defaultCenterLat + _waveFieldDefaultHalfBoxDeg;
       minLon = MapBounds.defaultCenterLon - _waveFieldDefaultHalfBoxDeg;
       maxLon = MapBounds.defaultCenterLon + _waveFieldDefaultHalfBoxDeg;
     }
-    // Clamp to the app's own fixed display range (MapBounds) so a route
-    // near the edge of that range doesn't request points from far outside
-    // anywhere this map ever draws.
+    // Clamp to the app's own fixed display range (MapBounds) so panning to
+    // the very edge of the visible range doesn't request points from far
+    // outside anywhere this map ever draws.
     minLat = minLat.clamp(MapBounds.minLat, MapBounds.maxLat);
     maxLat = maxLat.clamp(MapBounds.minLat, MapBounds.maxLat);
     minLon = minLon.clamp(MapBounds.minLon, MapBounds.maxLon);
@@ -2175,7 +2273,11 @@ class _MapScreenState extends State<MapScreen> {
 
     try {
       final results = await fetchOpenMeteoMarineGrid(points: gridPoints, forecastDays: forecastDays);
-      if (!mounted) return;
+      // Discard this result if a newer fetch (a later pan/zoom's debounced
+      // call, or another toggle-off/on) has started since — applying it
+      // would overwrite fresher in-flight data with a stale viewport's
+      // response landing late (see _waveFieldFetchGeneration's doc comment).
+      if (!mounted || myGeneration != _waveFieldFetchGeneration) return;
       setState(() {
         _waveFieldGrid = [
           for (final r in results) WaveFieldPoint(lat: r.latitude, lon: r.longitude, hourly: r.points),
@@ -2187,7 +2289,7 @@ class _MapScreenState extends State<MapScreen> {
       // debug dialog above): this batched multi-location request path is
       // even less exercised than the single-point one, so an unexpected
       // response shape is a real possibility, not just theoretical.
-      if (!mounted) return;
+      if (!mounted || myGeneration != _waveFieldFetchGeneration) return;
       setState(() => _waveFieldLoading = false);
       ScaffoldMessenger.of(context).showSnackBar(
         SnackBar(content: Text('Wave field fetch failed: $e')),
