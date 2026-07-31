@@ -252,23 +252,42 @@ Future<OpenMeteoMarineResult> fetchOpenMeteoMarine({
 /// value derived from a documented limit.
 const _maxLocationsPerRequest = 100;
 
+/// Ceiling on how many batch requests run *at the same time* (2026-07-30,
+/// after real-world "Too many concurrent requests" errors — see
+/// docs/data-format-notes.md's Open-Meteo section). Not documented on
+/// Open-Meteo's pricing/docs pages; the maintainer explained it directly on
+/// GitHub (open-meteo/open-meteo#1493): the free tier processes **one
+/// request at a time per IP**, queuing up to 6 more behind it — a 7th
+/// concurrent request gets rejected outright with "Too many concurrent
+/// requests", completely independent of the minute/hour/day call-count
+/// limits documented elsewhere. This is a *server-side concurrency* limit,
+/// not a rate/quota limit — sending fewer total calls doesn't help if they
+/// all land on the server at the same instant.
+///
+/// [fetchOpenMeteoMarineGrid] previously fired every batch at once via a
+/// single `Future.wait` — fine for the old ≤9-batch tile design, but the
+/// fixed-area redesign's ~35 batches per Import click blew past the
+/// server's 7-in-flight ceiling immediately. Batches now run through a
+/// small worker pool (see `_runBatchesWithLimitedConcurrency`) capped at
+/// this many concurrent requests instead — comfortably under 7, leaving
+/// margin for the ceiling not being perfectly exact and for sharing an
+/// IP/network with something else.
+const _maxConcurrentBatches = 4;
+
 /// Fetches the same hourly wave forecast as [fetchOpenMeteoMarine], but for
 /// many points — batched into one or more HTTP requests of at most
 /// [_maxLocationsPerRequest] locations each (see that constant's doc
-/// comment for why), fired concurrently and merged. Used to render a wave
-/// *field* over an area (2026-07-29 request: "地図上に波高を色分け表示、
-/// Windy風のアニメーション"; see wave_field.dart for how [points] is
-/// generated and capped).
+/// comment for why), run through a small concurrency pool (see
+/// [_maxConcurrentBatches]) rather than all at once, and merged. Used to
+/// render a wave *field* over an area (2026-07-29 request: "地図上に波高
+/// を色分け表示、Windy風のアニメーション"; see wave_field.dart for how
+/// [points] is generated and capped).
 ///
 /// Each returned [OpenMeteoMarineResult] carries its own resolved
 /// latitude/longitude (the actual model grid-cell center — see that field's
 /// doc comment), so callers should plot using those rather than assuming
 /// the *n*-th result corresponds positionally to the *n*-th input [points]
-/// entry — this function doesn't assert an order guarantee from the API,
-/// and batching makes that doubly true (results across batches are
-/// concatenated in batch order, but within Dart's `Future.wait` the
-/// individual HTTP responses themselves can still complete/parse in any
-/// order relative to each other before being reassembled).
+/// entry — this function doesn't assert an order guarantee from the API.
 ///
 /// Returns an empty list (not an error) for an empty [points] input,
 /// without making a request. All-or-nothing on failure: if any one batch's
@@ -295,10 +314,64 @@ Future<List<OpenMeteoMarineResult>> fetchOpenMeteoMarineGrid({
     batches.add(points.sublist(i, end));
   }
 
-  final batchResults = await Future.wait(
-    batches.map((batch) => _fetchOpenMeteoMarineBatch(batch, forecastDays: forecastDays)),
-  );
+  final batchResults = await _runBatchesWithLimitedConcurrency(batches, forecastDays: forecastDays);
   return [for (final batch in batchResults) ...batch];
+}
+
+/// Runs [batches] through [_fetchOpenMeteoMarineBatch], at most
+/// [_maxConcurrentBatches] in flight at once, preserving [batches]' own
+/// order in the returned list (each batch's result lands at its original
+/// index, regardless of which worker happened to fetch it or how long it
+/// took) — a simple fixed-size worker-pool pattern: each worker repeatedly
+/// claims the next not-yet-started batch index and awaits it, until none
+/// are left. The `nextIndex++` claim is safe without an explicit lock since
+/// Dart is single-threaded/cooperative — nothing else runs between reading
+/// and incrementing it (no `await` in between), so two workers can never
+/// claim the same index.
+///
+/// Stops claiming *new* batches as soon as any one fetch throws (Agent
+/// review, 2026-07-30 — the first version let every other worker keep
+/// firing new requests after a failure, which is specifically
+/// counterproductive if the failure was Open-Meteo itself rejecting a
+/// request for being over its own concurrency ceiling — see
+/// [_maxConcurrentBatches]'s doc comment: continuing to fire more requests
+/// right after that rejection just keeps hammering the same limit instead
+/// of backing off). Already-in-flight requests from other workers still
+/// complete naturally rather than being forcibly cancelled (Dart's `Future`
+/// has no cancellation primitive) — only the *next* claim is skipped. The
+/// first error encountered is rethrown (with its original stack trace)
+/// once every worker has stopped, preserving this function's documented
+/// all-or-nothing contract.
+Future<List<List<OpenMeteoMarineResult>>> _runBatchesWithLimitedConcurrency(
+  List<List<({double lat, double lon})>> batches, {
+  required int forecastDays,
+}) async {
+  final results = List<List<OpenMeteoMarineResult>>.filled(batches.length, const []);
+  var nextIndex = 0;
+  Object? firstError;
+  StackTrace? firstStackTrace;
+
+  Future<void> worker() async {
+    while (firstError == null && nextIndex < batches.length) {
+      final i = nextIndex;
+      nextIndex++;
+      try {
+        results[i] = await _fetchOpenMeteoMarineBatch(batches[i], forecastDays: forecastDays);
+      } catch (e, st) {
+        firstError ??= e;
+        firstStackTrace ??= st;
+        return;
+      }
+    }
+  }
+
+  final workerCount = batches.length < _maxConcurrentBatches ? batches.length : _maxConcurrentBatches;
+  await Future.wait(List.generate(workerCount, (_) => worker()));
+  final error = firstError;
+  if (error != null) {
+    Error.throwWithStackTrace(error, firstStackTrace!);
+  }
+  return results;
 }
 
 /// Fetches one batch (at most [_maxLocationsPerRequest] locations, per

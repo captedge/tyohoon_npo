@@ -29,6 +29,7 @@ import '../utils/open_meteo_marine_fetcher.dart';
 import '../utils/voyage_plan.dart';
 import '../utils/voyage_plan_parser.dart';
 import '../utils/wave_field.dart';
+import '../utils/wave_field_cache.dart';
 import '../widgets/map_painter.dart';
 import 'voyage_plan_screen.dart';
 
@@ -161,45 +162,34 @@ class _MapScreenState extends State<MapScreen> {
   // --- Wave field overlay state (2026-07-29, personal build only) ---
   //
   // See build_flags.dart's kPersonalBuild and wave_field.dart's top-of-file
-  // doc comment for the overall design. All of this stays at its initial
-  // "off"/empty value in a mainline build since the only UI that flips
-  // _waveFieldEnabled is itself gated by kPersonalBuild (see the AppBar
-  // toggle in build()) — nothing here runs unless the user explicitly turns
-  // the overlay on in a personal build.
-  bool _waveFieldEnabled = false;
-  bool _waveFieldLoading = false;
-  String? _waveFieldError;
+  // doc comment for the overall design. Redesigned 2026-07-30 (twice, same
+  // day — see wave_field_cache.dart's class doc for the full history) into
+  // a single fixed-area, manual-Import-only overlay: Display and Import
+  // both live in the Information dialog (_showLabelSettingsDialog's "Wave
+  // Field" section), the same "Display checkbox + Import button" pattern as
+  // Marine Forecast/JMA/JTWC, rather than a standalone AppBar toggle. All of
+  // this stays at its initial "off"/empty value in a mainline build since
+  // nothing populates it outside kPersonalBuild-gated code paths.
+  bool _waveFieldDisplayEnabled = false;
   List<WaveFieldPoint>? _waveFieldGrid;
+
+  // Wall-clock time of the last successful Import — shown as "Cached: ..."
+  // in the Information dialog (same convention as Marine Forecast's own
+  // fetchedAt label). No TTL/staleness attached to this (2026-07-30 design):
+  // it's purely informational, letting the user judge for themselves
+  // whether to re-import rather than the app deciding that on their behalf.
+  DateTime? _waveFieldFetchedAt;
 
   // Free-running animation clock for the flow streaks (see
   // MapPainter._drawWaveStreaks), independent of the playback timeline's
   // _startTime/_offsetHours — the streaks are a decorative "is the sea
   // moving" cue, not a plotted forecast value, so they animate continuously
   // in real device time rather than advancing only while Play is pressed.
-  // Ticks only while _waveFieldEnabled (see _setWaveFieldEnabled), same
+  // Ticks only while _waveFieldDisplayEnabled (see _syncWaveAnimTimer), same
   // "don't pay for what you're not showing" spirit as _playTimer only
   // running while _isPlaying.
   double _waveAnimSeconds = 0;
   Timer? _waveAnimTimer;
-
-  // Debounces re-fetching the grid after the visible map viewport changes
-  // (pan/zoom) — see _onViewportChangedForWaveField below. Replaces the
-  // original "route vicinity" fixed box with a "whatever's currently on
-  // screen" box (2026-07-30, per the 2026-07-29 decision recorded in
-  // docs/devlog-online-xml.md "波の場オーバーレイの表示範囲方式": a fixed
-  // full-area grid was rejected for data volume/render cost/coarse-grid
-  // reasons, and route-vicinity-only didn't let the user pan the map to see
-  // the wave field anywhere else).
-  Timer? _waveFieldViewportDebounce;
-
-  // Bumped every time a new wave field fetch starts. A fetch that resolves
-  // after a newer one has already started discards its own result instead
-  // of applying it (see _fetchWaveFieldGrid) — with the viewport able to
-  // trigger a fresh fetch every _waveFieldViewportDebounceMs while an
-  // earlier request is still in flight (slow network, several pans in a
-  // row), plain network completion order isn't guaranteed to match request
-  // order, so this stops a stale response from overwriting fresher data.
-  int _waveFieldFetchGeneration = 0;
 
   // Playback speed as a multiplier of the original fixed-speed behavior
   // (1.0 = "1 simulated hour per 200ms tick", which is what this screen
@@ -403,6 +393,12 @@ class _MapScreenState extends State<MapScreen> {
   // accent, not a value-dependent one.
   static const Color _marineForecastAccentColor = Color(0xFF00695C); // teal
 
+  // UI accent for the Wave Field (Open-Meteo, personal build) Information
+  // dialog section — same "single fixed UI accent" role as
+  // _marineForecastAccentColor above, unrelated to the height-dependent fill
+  // colors MapPainter itself uses to draw the overlay.
+  static const Color _waveFieldAccentColor = Color(0xFF0277BD); // light blue
+
   // Builds one [TyphoonMarker] from an already-resolved track — shared by
   // both the JTWC and JMA paths below, which differ only in how they build
   // [points]/[designation]/[pressureLabel]/[color].
@@ -512,6 +508,25 @@ class _MapScreenState extends State<MapScreen> {
     loadUiImage('assets/typhoon_icon01.png').then((image) {
       if (mounted) setState(() => _typhoonIcon = image);
     });
+    // Wave field disk state (2026-07-30, kPersonalBuild-only): loaded eagerly
+    // at startup rather than lazily on first Display-on, so the overlay (and
+    // its "Cached: ..." label) is ready to restore immediately — mirrors the
+    // coastline/icon loads above. The `if (kPersonalBuild)` guard means this
+    // whole block (and the wave_field_cache.dart calls it makes) is
+    // dead-code-eliminated out of a mainline build, not merely skipped at
+    // runtime (same convention as the kPersonalBuild-gated "Wave Field"
+    // Information-dialog section that reads/writes this).
+    if (kPersonalBuild) {
+      loadWaveFieldCache().then((saved) {
+        if (!mounted) return;
+        setState(() {
+          _waveFieldDisplayEnabled = saved.displayEnabled;
+          _waveFieldGrid = saved.points.isEmpty ? null : saved.points;
+          _waveFieldFetchedAt = saved.fetchedAt;
+        });
+        _syncWaveAnimTimer();
+      });
+    }
     // Keeps (_zoom, _translation) mirroring the controller's actual value
     // for *any* change to it — drag, pinch, or InteractiveViewer's own
     // built-in mouse-wheel zoom (see 2026-07-28 bug fix note on
@@ -525,13 +540,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _playTimer?.cancel();
     _waveAnimTimer?.cancel();
-    _waveFieldViewportDebounce?.cancel();
     _transformationController.removeListener(_syncFromController);
-    // Safe even if the overlay was off (and this listener was never added)
-    // — ChangeNotifier.removeListener is a no-op for a listener it doesn't
-    // have. Kept unconditional here rather than tracking "was it added" so
-    // disposing mid-overlay-on can't leak the listener.
-    _transformationController.removeListener(_onViewportChangedForWaveField);
     _transformationController.dispose();
     super.dispose();
   }
@@ -1007,6 +1016,18 @@ class _MapScreenState extends State<MapScreen> {
     var marineForecastFetching = false;
     String? marineForecastError;
 
+    // Wave Field (Open-Meteo, personal build only) dialog-local "draft"
+    // state (2026-07-30 redesign — see wave_field_cache.dart's class doc):
+    // same pattern as Marine Forecast above, unconditionally declared (cheap
+    // even in a mainline build, where these just stay at their defaults —
+    // only the widget row and importWaveField closure further below are
+    // actually kPersonalBuild-gated).
+    var waveFieldDisplayLocal = _waveFieldDisplayEnabled;
+    var waveFieldGridLocal = _waveFieldGrid;
+    var waveFieldFetchedAtLocal = _waveFieldFetchedAt;
+    var waveFieldFetching = false;
+    String? waveFieldError;
+
     // "Import All" state (2026-07-29 addition): unlike the per-slot fetch
     // state above (one bool/error per Typhoon block), these two buttons are
     // not tied to a particular slot — each press fills as many of slots
@@ -1206,6 +1227,68 @@ class _MapScreenState extends State<MapScreen> {
               }
             }
 
+            // Wave Field (Open-Meteo, personal build only) fetch (2026-07-30
+            // redesign — see wave_field_cache.dart's class doc for the full
+            // history). Unlike the earlier dynamic-viewport versions, this
+            // always fetches the same fixed area
+            // (waveFieldFixedMinLat/MaxLat/MinLon/MaxLon) at a fixed density
+            // (waveFieldFixedAreaMaxPoints) — no viewport tracking, tiles, or
+            // fetch-generation counter needed, since a single explicit click
+            // can't race with anything else (the Import button is disabled
+            // while waveFieldFetching, same "disabled while fetching"
+            // convention as fetchMarineForecast above).
+            Future<void> importWaveField() async {
+              setDialogState(() {
+                waveFieldFetching = true;
+                waveFieldError = null;
+              });
+              try {
+                // Same "size the request to the playback's own actual end
+                // time" fix the earlier dynamic-viewport version used
+                // (2026-07-29, "色が再生から最後まで変わっていかない" — see
+                // docs/completed-log.md's 2026-07-29 entry): Open-Meteo's
+                // hourly series starts at *today 00:00 real/device time*, not
+                // from _startTime, so forecastDays must cover the real
+                // elapsed days out to the playback's own end, +1 day margin,
+                // capped to the API's documented maximum of 8.
+                final playbackEnd = _startTime.add(Duration(minutes: (_maxOffsetHours * 60).round()));
+                final daysFromNowToPlaybackEnd = playbackEnd.difference(DateTime.now()).inHours / 24.0;
+                // math.max/min (not num.clamp, which returns `num` rather
+                // than `int` — a past pitfall already hit elsewhere in this
+                // codebase, see docs/completed-log.md's map-screen
+                // 2026-07-26 entries) keeps this an actual `int`, matching
+                // fetchOpenMeteoMarineGrid's `int forecastDays`.
+                final forecastDays = math.max(1, math.min(8, daysFromNowToPlaybackEnd.ceil() + 1));
+
+                final gridPoints = buildWaveFieldGridPoints(
+                  minLat: waveFieldFixedMinLat,
+                  maxLat: waveFieldFixedMaxLat,
+                  minLon: waveFieldFixedMinLon,
+                  maxLon: waveFieldFixedMaxLon,
+                  maxPoints: waveFieldFixedAreaMaxPoints,
+                );
+                final results = await fetchOpenMeteoMarineGrid(points: gridPoints, forecastDays: forecastDays);
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  waveFieldFetching = false;
+                  waveFieldGridLocal = [
+                    for (final r in results) WaveFieldPoint(lat: r.latitude, lon: r.longitude, hourly: r.points),
+                  ];
+                  waveFieldFetchedAtLocal = DateTime.now();
+                  // Auto-enable Display on a successful fetch — same
+                  // reasoning as fetchJma/fetchJtwc/fetchMarineForecast above.
+                  waveFieldDisplayLocal = true;
+                  waveFieldError = null;
+                });
+              } catch (e) {
+                if (!dialogOpen) return;
+                setDialogState(() {
+                  waveFieldFetching = false;
+                  waveFieldError = '取得に失敗しました: $e';
+                });
+              }
+            }
+
             // "Import All" (2026-07-29 addition, TASKS.md「複数台風が同時に
             // 発表されている場合の対応」): finds every currently-active
             // typhoon for a source (up to 3 — see fetchActiveJmaTyphoons/
@@ -1368,6 +1451,61 @@ class _MapScreenState extends State<MapScreen> {
                         ),
                       ],
                       const Divider(height: 28),
+                      if (kPersonalBuild) ...[
+                        // Wave Field (Open-Meteo, personal build only)
+                        // section (2026-07-30 redesign — see
+                        // wave_field_cache.dart's class doc for the full
+                        // history). Always the same fixed area
+                        // (waveFieldFixedMinLat/MaxLat/MinLon/MaxLon);
+                        // Import only ever runs when this button is pressed
+                        // — no connection to the map's pan/zoom at all, and
+                        // no TTL-based auto-refetch (see importWaveField
+                        // above).
+                        const Text('Wave Field (Open-Meteo, personal build)',
+                            style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Text(
+                          '固定エリア（北緯25-45°・東経125-150°）の波高をOpen-Meteoから取得し、'
+                          '地図上に色分け表示します。地図のパン・ズームでは再取得されません（この'
+                          'ボタンを押した時だけ通信します）。',
+                          style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                        ),
+                        const SizedBox(height: 6),
+                        Row(
+                          children: [
+                            displayCheckbox(
+                              'Display',
+                              _waveFieldAccentColor,
+                              waveFieldDisplayLocal,
+                              (v) => setDialogState(() => waveFieldDisplayLocal = v ?? false),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              onPressed: waveFieldFetching ? null : importWaveField,
+                              icon: waveFieldFetching
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(strokeWidth: 2),
+                                    )
+                                  : Icon(Icons.water, size: 16, color: _waveFieldAccentColor),
+                              label: Text(waveFieldFetching ? 'Importing...' : 'Import wave field'),
+                            ),
+                          ],
+                        ),
+                        if (waveFieldError != null) ...[
+                          const SizedBox(height: 4),
+                          Text(waveFieldError!, style: const TextStyle(fontSize: 12, color: Colors.red)),
+                        ],
+                        if (waveFieldFetchedAtLocal != null) ...[
+                          const SizedBox(height: 2),
+                          Text(
+                            'Cached: ${_formatDateTime(waveFieldFetchedAtLocal!)}',
+                            style: TextStyle(fontSize: 10, color: Colors.grey.shade600),
+                          ),
+                        ],
+                        const Divider(height: 28),
+                      ],
                       // "Import All" (2026-07-29 addition, labeled "Import"
                       // rather than "Fetch" per 2026-07-29 user request —
                       // see the per-slot "Import from JMA"/"Import from
@@ -1699,8 +1837,31 @@ class _MapScreenState extends State<MapScreen> {
                       _marineForecastRawXmls = marineForecastRawXmlsLocal;
                       _marineForecastFetchedAtJst = marineForecastFetchedAtLocal;
                       _marineForecastByArea = _parseMarineForecastByArea(marineForecastRawXmlsLocal);
+                      // Wave Field (2026-07-30 redesign) — write back the
+                      // dialog-local draft state (same pattern as Marine
+                      // Forecast just above).
+                      if (kPersonalBuild) {
+                        _waveFieldDisplayEnabled = waveFieldDisplayLocal;
+                        _waveFieldGrid = waveFieldGridLocal;
+                        _waveFieldFetchedAt = waveFieldFetchedAtLocal;
+                      }
                     });
                     _saveState();
+                    if (kPersonalBuild) {
+                      // Starts/stops the flow-streak timer to match whatever
+                      // Display just got committed to above.
+                      _syncWaveAnimTimer();
+                      // Kept in its own file rather than folded into
+                      // _saveState()'s AppStateStorage write — see
+                      // wave_field_cache.dart's class doc for why. Not
+                      // awaited, same best-effort spirit as _saveState()'s
+                      // own fire-and-forget AppStateStorage.save call.
+                      unawaited(saveWaveFieldCache(WaveFieldSavedState(
+                        displayEnabled: _waveFieldDisplayEnabled,
+                        points: _waveFieldGrid ?? const [],
+                        fetchedAt: _waveFieldFetchedAt,
+                      )));
+                    }
                     dialogOpen = false;
                     Navigator.pop(dialogContext);
                   },
@@ -2108,192 +2269,30 @@ class _MapScreenState extends State<MapScreen> {
   //
   // Follow-up to the Open-Meteo text-only trial dialog above: once that
   // confirmed real wave data could be fetched, the request became "show it
-  // on the map, color-coded, Windy-style animation". Initially fetched
-  // "route vicinity only"; changed 2026-07-30 to follow the current map
-  // viewport instead (pan/zoom triggers a debounced re-fetch) — see
-  // wave_field.dart's top-of-file doc comment for why. See also
-  // MapPainter._drawWaveField for the rest of the design.
+  // on the map, color-coded, Windy-style animation". Went through two
+  // dynamic-viewport designs (route-vicinity-only, then follow-the-map box)
+  // before settling 2026-07-30 on a **fixed-area, manual-Import-only**
+  // model — see wave_field_cache.dart's class doc for the full history of
+  // why. Display on/off and the "Import wave field" button both live in the
+  // Information dialog now (_showLabelSettingsDialog's "Wave Field"
+  // section, importWaveField closure) — see also MapPainter._drawWaveField
+  // for the rendering side, which is unchanged by any of this.
 
-  // Toggles the overlay on/off (AppBar button in build(), kPersonalBuild
-  // only). Turning on starts the flow-streak animation timer and triggers a
-  // fetch if there's no grid yet (or the last fetch failed); turning off
-  // just stops the timer and hides the overlay — whatever grid was already
-  // fetched is kept, so switching back on doesn't necessarily re-fetch. This
-  // is a trial UI ("見た目を確認したい"), not a live-updating forecast
-  // display, so slightly-stale cached data on toggle-back-on is an
-  // acceptable tradeoff for not re-hitting the API every time.
-  void _setWaveFieldEnabled(bool enabled) {
-    // Defensive early-out (Agent review, 2026-07-30): the only caller today
-    // is the AppBar toggle button, which is disabled while
-    // _waveFieldLoading — so in practice this is never called with the same
-    // value twice in a row, which would otherwise double-register the
-    // viewport listener below (Listenable doesn't dedupe addListener calls).
-    // Kept here so that invariant doesn't have to keep holding if another
-    // call site (e.g. a keyboard shortcut) is ever added.
-    if (enabled == _waveFieldEnabled) return;
-    setState(() => _waveFieldEnabled = enabled);
-    if (enabled) {
+  // Starts/stops the flow-streak animation timer to track
+  // _waveFieldDisplayEnabled. Called from initState's disk-load callback and
+  // from the Information dialog's Save handler — the only two places
+  // _waveFieldDisplayEnabled can change now that there's no standalone
+  // AppBar toggle. Idempotent either direction (safe to call even when
+  // nothing actually changed).
+  void _syncWaveAnimTimer() {
+    if (_waveFieldDisplayEnabled) {
       _waveAnimTimer ??= Timer.periodic(const Duration(milliseconds: 100), (_) {
         if (!mounted) return;
         setState(() => _waveAnimSeconds += 0.1);
       });
-      // Registered only while the overlay is on (mirrors _waveAnimTimer's
-      // own "don't pay for what you're not showing" pattern above) — a user
-      // who never turns the overlay on in a personal build never pays the
-      // per-pan/zoom listener cost.
-      _transformationController.addListener(_onViewportChangedForWaveField);
-      if (_waveFieldGrid == null && !_waveFieldLoading) {
-        // Not awaited: this screen doesn't block the toggle UI on the
-        // fetch — _waveFieldLoading (set synchronously at the top of
-        // _fetchWaveFieldGrid) drives the button's spinner/disabled state
-        // instead, and the method guards its own `mounted`/generation
-        // checks before touching state, so nothing here needs to wait on it.
-        _fetchWaveFieldGrid();
-      }
     } else {
       _waveAnimTimer?.cancel();
       _waveAnimTimer = null;
-      _transformationController.removeListener(_onViewportChangedForWaveField);
-      _waveFieldViewportDebounce?.cancel();
-      _waveFieldViewportDebounce = null;
-      // Defensive reset (wrapped in setState since this feeds the AppBar
-      // button's spinner/disabled state) to match the "never disabled while
-      // loading" invariant above even if a future disable path is added
-      // while a fetch happens to be in flight.
-      if (_waveFieldLoading) setState(() => _waveFieldLoading = false);
-    }
-  }
-
-  // Fires on every change to _transformationController (drag, pinch, wheel,
-  // +/- buttons/slider, or the initial view-fit) while the overlay is on.
-  // Debounced rather than fetching on every frame of an in-progress
-  // drag/pinch — Open-Meteo is only hit after the view has been still for
-  // _waveFieldViewportDebounceMs, the same "settle before fetching" pattern
-  // as a search-as-you-type box.
-  static const _waveFieldViewportDebounceMs = 700;
-
-  void _onViewportChangedForWaveField() {
-    _waveFieldViewportDebounce?.cancel();
-    _waveFieldViewportDebounce = Timer(
-      const Duration(milliseconds: _waveFieldViewportDebounceMs),
-      () {
-        if (!mounted || !_waveFieldEnabled) return;
-        _fetchWaveFieldGrid();
-      },
-    );
-  }
-
-  // Computes the lat/lon box currently visible in the map viewport, by
-  // inverse-transforming the viewport's top-left/bottom-right corners
-  // through the same controller matrix _latLonAtViewportPoint already uses
-  // for the cursor lat/lon readout. The app never rotates the map (see
-  // _applyTransform's doc comment — always "translate then uniform scale"),
-  // so those two corners alone fully determine the box; the other two
-  // corners don't add information. Returns null if the viewport size isn't
-  // known yet (before first layout).
-  ({double minLat, double maxLat, double minLon, double maxLon})? _visibleLatLonBounds() {
-    if (_viewportSize.width <= 0 || _viewportSize.height <= 0) return null;
-    final topLeft = _latLonAtViewportPoint(Offset.zero);
-    final bottomRight = _latLonAtViewportPoint(Offset(_viewportSize.width, _viewportSize.height));
-    if (topLeft == null || bottomRight == null) return null;
-    return (minLat: bottomRight.lat, maxLat: topLeft.lat, minLon: topLeft.lon, maxLon: bottomRight.lon);
-  }
-
-  // Computes the sample grid's bounding box from the map's current visible
-  // viewport (2026-07-30, replacing the original "route vicinity" box — see
-  // _waveFieldViewportDebounce's doc comment above for why), padded by
-  // _waveFieldViewportPaddingFraction of the visible box's *own* size on
-  // each side (a fraction rather than a fixed degree amount, since the
-  // visible box's size varies hugely with zoom — under a degree zoomed
-  // all the way in, the whole N5-50/E85-170 range zoomed all the way out)
-  // so a small pan shows already-fetched data at the new edge instead of an
-  // immediate blank strip while the debounced re-fetch is still pending.
-  // Falls back to a small fixed box around MapBounds' default center if the
-  // viewport size isn't known yet (first frame, before layout) — then
-  // fetches wave data for the resulting box via Open-Meteo's batched
-  // multi-location endpoint.
-  static const double _waveFieldViewportPaddingFraction = 0.15;
-  static const double _waveFieldDefaultHalfBoxDeg = 3.0;
-
-  Future<void> _fetchWaveFieldGrid() async {
-    final myGeneration = ++_waveFieldFetchGeneration;
-    setState(() => _waveFieldLoading = true);
-
-    double minLat, maxLat, minLon, maxLon;
-    final visible = _visibleLatLonBounds();
-    if (visible != null) {
-      final latPad = (visible.maxLat - visible.minLat) * _waveFieldViewportPaddingFraction;
-      final lonPad = (visible.maxLon - visible.minLon) * _waveFieldViewportPaddingFraction;
-      minLat = visible.minLat - latPad;
-      maxLat = visible.maxLat + latPad;
-      minLon = visible.minLon - lonPad;
-      maxLon = visible.maxLon + lonPad;
-    } else {
-      minLat = MapBounds.defaultCenterLat - _waveFieldDefaultHalfBoxDeg;
-      maxLat = MapBounds.defaultCenterLat + _waveFieldDefaultHalfBoxDeg;
-      minLon = MapBounds.defaultCenterLon - _waveFieldDefaultHalfBoxDeg;
-      maxLon = MapBounds.defaultCenterLon + _waveFieldDefaultHalfBoxDeg;
-    }
-    // Clamp to the app's own fixed display range (MapBounds) so panning to
-    // the very edge of the visible range doesn't request points from far
-    // outside anywhere this map ever draws.
-    minLat = minLat.clamp(MapBounds.minLat, MapBounds.maxLat);
-    maxLat = maxLat.clamp(MapBounds.minLat, MapBounds.maxLat);
-    minLon = minLon.clamp(MapBounds.minLon, MapBounds.maxLon);
-    maxLon = maxLon.clamp(MapBounds.minLon, MapBounds.maxLon);
-
-    final gridPoints = buildWaveFieldGridPoints(
-      minLat: minLat,
-      maxLat: maxLat,
-      minLon: minLon,
-      maxLon: maxLon,
-    );
-
-    // Open-Meteo's hourly series starts at *today 00:00 real/device time*
-    // and runs `forecastDays` out from there (API docs) — it is NOT
-    // anchored to _startTime, which can itself already be hours into that
-    // window (e.g. a typhoon issued yesterday) and which playback then
-    // advances up to _maxOffsetHours further. The fetch previously used the
-    // function's 2-day default regardless of how long the loaded voyage
-    // actually plays for; once a longer playback ran past that ~48h fetched
-    // window, every later point clamped to the last fetched hour's value
-    // (see interpolateHourlyValue's "not before/after the series" clamping
-    // in wave_field.dart) — the color would then stop changing for the rest
-    // of playback (2026-07-29 user report: "色が再生から最後まで変わって
-    // いかない"). Fixed by sizing the request to the playback's own actual
-    // end time (real elapsed days from now, not from _startTime), +1 day
-    // safety margin, clamped to the API's documented maximum of 8.
-    final playbackEnd = _startTime.add(Duration(minutes: (_maxOffsetHours * 60).round()));
-    final daysFromNowToPlaybackEnd = playbackEnd.difference(DateTime.now()).inHours / 24.0;
-    // math.max/min (not num.clamp, which returns `num` rather than `int` —
-    // a past pitfall already hit elsewhere in this codebase, see
-    // docs/completed-log.md's map-screen 2026-07-26 entries) keeps this an
-    // actual `int`, matching fetchOpenMeteoMarineGrid's `int forecastDays`.
-    final forecastDays = math.max(1, math.min(8, daysFromNowToPlaybackEnd.ceil() + 1));
-
-    try {
-      final results = await fetchOpenMeteoMarineGrid(points: gridPoints, forecastDays: forecastDays);
-      // Discard this result if a newer fetch (a later pan/zoom's debounced
-      // call, or another toggle-off/on) has started since — applying it
-      // would overwrite fresher in-flight data with a stale viewport's
-      // response landing late (see _waveFieldFetchGeneration's doc comment).
-      if (!mounted || myGeneration != _waveFieldFetchGeneration) return;
-      setState(() {
-        _waveFieldGrid = [
-          for (final r in results) WaveFieldPoint(lat: r.latitude, lon: r.longitude, hourly: r.points),
-        ];
-        _waveFieldLoading = false;
-      });
-    } catch (e) {
-      // Broad catch-all deliberately kept (same reasoning as the Open-Meteo
-      // debug dialog above): this batched multi-location request path is
-      // even less exercised than the single-point one, so an unexpected
-      // response shape is a real possibility, not just theoretical.
-      if (!mounted || myGeneration != _waveFieldFetchGeneration) return;
-      setState(() => _waveFieldLoading = false);
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Wave field fetch failed: $e')),
-      );
     }
   }
 
@@ -2306,7 +2305,7 @@ class _MapScreenState extends State<MapScreen> {
   // touched here.
   List<WaveFieldSample> get _currentWaveFieldSamples {
     final grid = _waveFieldGrid;
-    if (!_waveFieldEnabled || grid == null) return const [];
+    if (!_waveFieldDisplayEnabled || grid == null) return const [];
     final time = _currentTime;
     return [
       for (final p in grid)
@@ -3245,25 +3244,11 @@ class _MapScreenState extends State<MapScreen> {
               tooltip: 'Open-Meteo marine (trial)',
               onPressed: _showOpenMeteoDebugDialog,
             ),
-          // Map overlay toggle (2026-07-29 follow-up request: "地図上に波高
-          // を色分け表示、Windy風のアニメーション、航路周辺のみ") — separate
-          // from the text-only debug dialog above, which stays as-is for raw
-          // data inspection. Highlighted (tinted) while on, spinner while a
-          // fetch is in flight, same "disabled while loading" convention as
-          // the debug dialog's own Fetch button.
-          if (kPersonalBuild)
-            IconButton(
-              icon: _waveFieldLoading
-                  ? const SizedBox(
-                      width: 20,
-                      height: 20,
-                      child: CircularProgressIndicator(strokeWidth: 2),
-                    )
-                  : const Icon(Icons.blur_on),
-              color: _waveFieldEnabled ? Colors.blue : null,
-              tooltip: 'Wave field overlay (trial)',
-              onPressed: _waveFieldLoading ? null : () => _setWaveFieldEnabled(!_waveFieldEnabled),
-            ),
+          // Map overlay toggle removed (2026-07-30) — Display/Import moved
+          // into the Information dialog's "Wave Field" section (mirroring
+          // Marine Forecast/JMA/JTWC's own Display+Import pattern) as part
+          // of the fixed-area, manual-Import-only redesign — see
+          // wave_field_cache.dart's class doc.
         ],
       ),
       body: Column(

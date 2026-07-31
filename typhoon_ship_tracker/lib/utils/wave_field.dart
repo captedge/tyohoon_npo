@@ -11,13 +11,17 @@ import 'open_meteo_marine_fetcher.dart';
 /// `WaveFieldSample` type, so the actual data-source/licensing specifics
 /// stay confined to this personal-build-only layer).
 ///
-/// Which area that grid covers has changed once: initially "route vicinity
-/// only" (2026-07-29), then changed to "whatever's currently visible in the
-/// map viewport, refetched as the user pans/zooms" (2026-07-30) per the
-/// decision in docs/devlog-online-xml.md "波の場オーバーレイの表示範囲方式"
-/// — see map_screen.dart's `_fetchWaveFieldGrid`/`_visibleLatLonBounds` for
-/// where that box actually comes from; this file stays agnostic to it and
-/// just turns whatever box it's given into a grid.
+/// Which area that grid covers has changed several times (2026-07-29→30):
+/// "route vicinity only" → "whatever's currently visible in the map
+/// viewport, refetched as the user pans/zooms" (with a tile-based cache) →
+/// finally a **single fixed area, fetched only on an explicit "Import wave
+/// field" button press** (see wave_field_cache.dart's class doc for the
+/// full history and why the dynamic-viewport designs were abandoned). The
+/// fixed box's bounds now come from wave_field_cache.dart's
+/// `waveFieldFixedMinLat`/`MaxLat`/`MinLon`/`MaxLon`, passed in by
+/// map_screen.dart's `importWaveField` closure (inside
+/// `_showLabelSettingsDialog`) — this file stays agnostic to where the box
+/// comes from and just turns whatever box it's given into a grid.
 
 /// One sampled grid point, carrying the full hourly series so the caller can
 /// re-interpolate at whatever playback time the user has the slider on
