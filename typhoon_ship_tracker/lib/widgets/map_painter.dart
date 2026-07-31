@@ -186,63 +186,6 @@ class WaveFieldSample {
   final double? directionDeg;
 }
 
-/// One local-marine-forecast area's (地方海上予報区, VPCY51) wave-height
-/// forecast, ready to draw — mainline feature (2026-07-30), unlike
-/// [WaveFieldSample] above which is personal-build only (this layer is the
-/// production replacement for the "Marine forecast (debug)" text-only
-/// verification dialog, once real-data fetches were confirmed working —
-/// see docs/completed-log.md). Deliberately generic (no JMA-specific
-/// types): map_screen.dart resolves a fetched+parsed [MarineWaveForecast]
-/// (jma_marine_xml_parser.dart) down to just this area's Base wave height
-/// and its bundled boundary polygons (marine_areas.dart) before handing it
-/// to this painter — same "painter owns only generic shapes, caller
-/// resolves the source-specific type" convention as
-/// ShipMarker/TyphoonMarker/WaveFieldSample above.
-class MarineForecastAreaPolygon {
-  const MarineForecastAreaPolygon({required this.id, required this.polygons, this.heightM});
-
-  /// Opaque per-area identity token (map_screen.dart passes VPCY51's own
-  /// `Area/Code`, but this painter treats it as a plain identifier only —
-  /// no JMA-specific meaning) used solely by [MapPainter._marineForecastAreasChanged]
-  /// to tell "this is the same area, did its height change" apart from "the
-  /// area at this list position happens to be different from last frame"
-  /// (2026-07-30 Agent review finding: comparing by list position alone was
-  /// wrong here, unlike [WaveFieldSample]'s fixed-order sample grid, because
-  /// this list's order is a `Map.entries` iteration order that can shift
-  /// between fetches — see marine_areas.dart's caller for how it's built).
-  final String id;
-
-  /// This area's boundary, exterior rings only (see marine_areas.dart's doc
-  /// comment for why interior rings/holes were dropped when the bundled
-  /// asset was generated — same "exterior only" convention as
-  /// coastline.json). Usually one ring per area, occasionally more where the
-  /// display-range clip split it.
-  final List<List<LatLng>> polygons;
-
-  /// Base (現況〜基準時点) wave height in meters — see
-  /// [MarineWaveForecast.baseHeightM]'s doc comment (jma_marine_xml_parser.dart)
-  /// for why this is a plain numeric value rather than a class/bucket
-  /// string. Null when this area currently has no forecast value (VPCY51's
-  /// `condition="予報なし"` case, e.g. sea-ice areas) — such an area is
-  /// still outlined by [MapPainter._drawMarineForecastAreas] but left
-  /// unfilled, the same "outline always, fill only when there's a value"
-  /// treatment [WaveFieldSample.heightM] null gives its blob.
-  ///
-  /// **Base only for now, not yet slider-time-linked to `Becoming`** (2026-
-  /// 07-30): VPCY51 expresses a wave-height *change* over time via up to two
-  /// `Becoming` entries with a free-text `TimeModifier` (e.g. "１０日２１時
-  /// までに") rather than a fixed absolute time — see
-  /// jma_marine_xml_parser.dart's `MarineWaveBecoming` doc comment for why
-  /// resolving that phrase into an absolute JST time was deliberately left
-  /// as a follow-up (needs more real bulletins to confirm the phrasing
-  /// patterns before parsing it reliably). Until that's done, this layer
-  /// always shows the *current* (Base) forecast regardless of where the
-  /// playback slider is, rather than the "階段状" (step-function) display
-  /// that was the original design intent (see docs/devlog-online-xml.md
-  /// "①の再生バーへの組み込み設計方針") — see TASKS.md for this follow-up.
-  final double? heightM;
-}
-
 /// Draws the simplified plot map: a lat/lon grid, coastline, the ship/
 /// typhoon tracks, and their markers, with a distance line between each ship
 /// and the first (primary) typhoon.
@@ -301,14 +244,6 @@ class MapPainter extends CustomPainter {
   /// wave-field flow streaks. Not meaningful when [waveField] is empty.
   final double waveAnimSeconds;
 
-  /// Local-marine-forecast area (VPCY51) fill layer — mainline feature
-  /// (2026-07-30), always empty until the user has fetched+enabled it via
-  /// the Information dialog's "Marine Forecast" section (unlike [waveField],
-  /// this one isn't build-flag-gated — it's meant to ship in the
-  /// distributable mainline build once real-data fetches confirmed the
-  /// parser). See [MarineForecastAreaPolygon]'s doc comment.
-  final List<MarineForecastAreaPolygon> marineForecastAreas;
-
   MapPainter({
     this.ships = const [],
     this.coastlinePolygons = const [],
@@ -318,18 +253,12 @@ class MapPainter extends CustomPainter {
     this.typhoonIcon,
     this.waveField = const [],
     this.waveAnimSeconds = 0,
-    this.marineForecastAreas = const [],
   });
 
   @override
   void paint(Canvas canvas, Size size) {
     _drawSea(canvas, size);
     _drawGrid(canvas);
-    // Marine forecast area fill drawn before the (personal-build-only) wave
-    // field trial, so a personal build comparing both layers sees the
-    // finer-grained trial overlay on top of the official per-area fill —
-    // both are drawn before the coastline so land masks either of them.
-    _drawMarineForecastAreas(canvas, marineForecastAreas);
     _drawWaveField(canvas, waveField, waveAnimSeconds);
     _drawCoastline(canvas);
     for (final ship in ships) {
@@ -526,41 +455,77 @@ class MapPainter extends CustomPainter {
 
   // Wave-height → color scale, calm (blue) to rough (red/pink), loosely
   // modeled on Windy's own wave-layer palette. [heightM] is clamped to
-  // 0-4m — this app's use case (route-vicinity trial, not open-ocean storm
-  // conditions) doesn't need to distinguish anything past "rough" with a
-  // dedicated color stop.
-  static const List<Color> _waveHeightColorStops = [
-    Color(0xFF2E7DFA), // calm
-    Color(0xFF29C7C0),
-    Color(0xFFB23BD9),
-    Color(0xFFE23B6B), // rough
+  // 0-8m (2026-07-31, raised from the original 0-4m: "台風の際は8ｍ程度の
+  // レンジまで欲しい" — the original 4m ceiling meant anything from a
+  // moderately rough sea up through full typhoon conditions all painted as
+  // the same saturated "rough" color, with no way to tell a 4m sea from an
+  // 8m one).
+  //
+  // Public (no leading underscore, 2026-07-31): map_screen.dart's wave-
+  // height color-bar legend builds a `LinearGradient` from this exact same
+  // list so the legend can never visually drift from what this painter
+  // actually draws — see _buildWaveHeightLegend's doc comment there. Evenly
+  // spaced across 0-8m (i.e. stop N sits at N/5 * 8m for this 6-stop list),
+  // matching the linear `t = heightM/8.0` interpolation [_waveHeightColor]
+  // below does — this generalizes to any stop count, so this list's length
+  // can change freely without touching that method.
+  //
+  // 6-stop blue→green→yellow→orange→purple→red progression (2026-07-31,
+  // replacing the original 4-stop blue→teal→purple→pink scale): user
+  // feedback after the 0-8m range expansion above was "中間レンジの2-5mの
+  // あたりが、0-2ｍとの区別が少し難しい...5-6ｍ紫系より上はわかりやすい" —
+  // the old teal 2nd stop was too close in hue to the calm-blue 1st stop to
+  // tell apart, while purple→red (already the 3rd→4th stop) read fine. Kept
+  // the working blue/purple/red anchors and inserted green/yellow/orange
+  // between blue and purple so every step across the full range has a
+  // clearly distinct hue, rather than just recoloring the one weak stop
+  // (which would have jumped straight from green to purple with no
+  // transition — see the "案A" alternative discussed with the user and not
+  // chosen).
+  static const List<Color> waveHeightColorStops = [
+    Color(0xFF2E7DFA), // calm (0m)
+    Color(0xFF2ECC71), // green
+    Color(0xFFF4D03F), // yellow
+    Color(0xFFF2994A), // orange
+    Color(0xFFB23BD9), // purple
+    Color(0xFFE23B6B), // rough (8m)
   ];
 
   Color _waveHeightColor(double heightM) {
-    final t = (heightM / 4.0).clamp(0.0, 1.0);
-    final scaled = t * (_waveHeightColorStops.length - 1);
-    final i = scaled.floor().clamp(0, _waveHeightColorStops.length - 2);
+    final t = (heightM / 8.0).clamp(0.0, 1.0);
+    final scaled = t * (waveHeightColorStops.length - 1);
+    final i = scaled.floor().clamp(0, waveHeightColorStops.length - 2);
     final localT = scaled - i;
-    return Color.lerp(_waveHeightColorStops[i], _waveHeightColorStops[i + 1], localT)!;
+    return Color.lerp(waveHeightColorStops[i], waveHeightColorStops[i + 1], localT)!;
   }
 
-  // A few short white streaks per sample, drifting in the direction the
-  // waves are traveling (`directionDeg` is where they come *from*, per
-  // Open-Meteo's convention — see WaveFieldSample.directionDeg — so travel
-  // direction is directionDeg+180). Purely decorative motion driven by
-  // [animSeconds], a free-running clock independent of the playback
-  // timeline (map_screen.dart's own Timer.periodic) — this is "does the sea
-  // look like it's moving", not a plotted forecast value, so it ticks
-  // continuously regardless of whether the user has pressed Play.
+  // A few small white chevrons ("›" shapes, apex leading) per sample,
+  // drifting in the direction the waves are traveling (`directionDeg` is
+  // where they come *from*, per Open-Meteo's convention — see
+  // WaveFieldSample.directionDeg — so travel direction is directionDeg+180).
+  // Purely decorative motion driven by [animSeconds], a free-running clock
+  // independent of the playback timeline (map_screen.dart's own
+  // Timer.periodic) — this is "does the sea look like it's moving", not a
+  // plotted forecast value, so it ticks continuously regardless of whether
+  // the user has pressed Play.
+  //
+  // Replaces a plain straight-line streak (2026-07-29 original) which read
+  // as "something is moving" but not clearly *which way* — 2026-07-31
+  // feedback: "どちらに流れているかわかりにくい". A chevron's apex always
+  // points in the travel direction, so the shape itself (not just its
+  // motion) conveys direction, like the flowing ">" markers common on ocean-
+  // current maps. An arrowhead-tipped straight streak was tried first and
+  // also rejected by the user in favor of this shape.
   //
   // Fixed-on-screen-size treatment (translate + scale(1/zoom)), same
-  // convention as every other marker in this file — the streaks are meant
+  // convention as every other marker in this file — the chevrons are meant
   // to read as a constant visual texture, not something that grows/shrinks
   // as the user zooms.
   static const int _waveStreakCount = 3;
   static const double _waveStreakCycleSeconds = 3.0;
   static const double _waveStreakTravelPx = 16.0;
-  static const double _waveStreakLengthPx = 6.0;
+  static const double _waveChevronArmLengthPx = 5.0;
+  static const double _waveChevronHalfWidthPx = 3.0;
 
   void _drawWaveStreaks(Canvas canvas, WaveFieldSample sample, double animSeconds) {
     final center = MapBounds.toOffset(sample.lat, sample.lon);
@@ -570,6 +535,7 @@ class MapPainter extends CustomPainter {
     // this app's zoom levels; not meant for precise bearing reading (the
     // numeric readout, if ever added, would use the real value directly).
     final dir = Offset(math.sin(travelBearingRad), -math.cos(travelBearingRad));
+    final perp = Offset(-dir.dy, dir.dx);
 
     canvas.save();
     canvas.translate(center.dx, center.dy);
@@ -577,83 +543,25 @@ class MapPainter extends CustomPainter {
     for (var i = 0; i < _waveStreakCount; i++) {
       final phase = (animSeconds / _waveStreakCycleSeconds + i / _waveStreakCount) % 1.0;
       // Fade in over the first 15% of the cycle, hold, fade out over the
-      // last 20% — avoids every streak popping in/out abruptly at the wrap
+      // last 20% — avoids every chevron popping in/out abruptly at the wrap
       // point, which reads as flickering rather than flowing.
       final opacity = phase < 0.15 ? phase / 0.15 : (phase > 0.8 ? (1 - phase) / 0.2 : 1.0);
-      final start = dir * (_waveStreakTravelPx * phase);
-      final end = start + dir * _waveStreakLengthPx;
+      // The chevron's leading point (apex) — same "distance traveled along
+      // dir so far this cycle" the old streak's `start` used, just renamed
+      // to reflect that this is now the whole shape's anchor, not one end of
+      // a line segment.
+      final apex = dir * (_waveStreakTravelPx * phase);
+      final back = apex - dir * _waveChevronArmLengthPx;
+      final armA = back + perp * _waveChevronHalfWidthPx;
+      final armB = back - perp * _waveChevronHalfWidthPx;
       final paint = Paint()
-        ..color = Colors.white.withOpacity(0.75 * opacity.clamp(0.0, 1.0))
+        ..color = Colors.white.withOpacity(0.8 * opacity.clamp(0.0, 1.0))
         ..strokeWidth = 1.6
         ..strokeCap = StrokeCap.round;
-      canvas.drawLine(start, end, paint);
+      canvas.drawLine(apex, armA, paint);
+      canvas.drawLine(apex, armB, paint);
     }
     canvas.restore();
-  }
-
-  // --- Marine forecast area fill (地方海上予報, VPCY51) — mainline feature,
-  // 2026-07-30 ---
-  //
-  // Unlike the wave field trial above, this is genuinely discrete source
-  // data (one Base wave-height value per whole sea area, not a sampled
-  // continuous field — see docs/data-format-notes.md "波の高さの表現形式"),
-  // so each area is filled as a single flat-colored polygon rather than a
-  // blurred blob/gradient. Drawn before _drawCoastline (see [paint]) so land
-  // naturally masks any area polygon overlapping it, same reasoning as
-  // _drawWaveField.
-  void _drawMarineForecastAreas(Canvas canvas, List<MarineForecastAreaPolygon> areas) {
-    if (areas.isEmpty) return;
-    // Outline drawn for every area regardless of whether it has a height
-    // value (see MarineForecastAreaPolygon.heightM doc comment) — lets the
-    // forecast-region boundaries read as a reference grid even where there's
-    // nothing to fill, similar in spirit to the lat/lon grid lines.
-    final outline = Paint()
-      ..color = Colors.blueGrey.withOpacity(0.45)
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 0.75;
-    for (final area in areas) {
-      final height = area.heightM;
-      final fill = height == null ? null : (Paint()..color = _marineForecastColor(height).withOpacity(0.5));
-      for (final ring in area.polygons) {
-        if (ring.isEmpty) continue;
-        final path = Path();
-        for (var i = 0; i < ring.length; i++) {
-          final o = MapBounds.toOffset(ring[i].latitude, ring[i].longitude);
-          if (i == 0) {
-            path.moveTo(o.dx, o.dy);
-          } else {
-            path.lineTo(o.dx, o.dy);
-          }
-        }
-        path.close();
-        if (fill != null) canvas.drawPath(path, fill);
-        canvas.drawPath(path, outline);
-      }
-    }
-  }
-
-  // Wave-height → colour scale for the mainline area-fill layer — kept
-  // separate from _waveHeightColor (the personal-build wave field trial's
-  // own scale) since this layer covers the *whole* forecast area nationwide
-  // during an actual typhoon, where VPCY51's real forecasts can reach into
-  // the 6-9m+ range (see docs/data-format-notes.md), unlike the trial's
-  // route-vicinity assumption that 0-4m was enough resolution. Clamped to
-  // 0-6m — this app's use case is "does the captain need to worry", not
-  // finely distinguishing degrees of an already-extreme sea state.
-  static const List<Color> _marineForecastColorStops = [
-    Color(0xFF2E7DFA), // calm
-    Color(0xFF29C7C0),
-    Color(0xFFF2C230),
-    Color(0xFFE2703B),
-    Color(0xFFB2293B), // very rough
-  ];
-
-  Color _marineForecastColor(double heightM) {
-    final t = (heightM / 6.0).clamp(0.0, 1.0);
-    final scaled = t * (_marineForecastColorStops.length - 1);
-    final i = scaled.floor().clamp(0, _marineForecastColorStops.length - 2);
-    final localT = scaled - i;
-    return Color.lerp(_marineForecastColorStops[i], _marineForecastColorStops[i + 1], localT)!;
   }
 
   // Real coastline (Natural Earth 1:50m, clipped to MapBounds — see
@@ -1260,27 +1168,7 @@ class MapPainter extends CustomPainter {
         // this comparison is cheap/dead there too — no per-frame cost added
         // outside the personal-build trial (2026-07-29's whole point).
         oldDelegate.waveAnimSeconds != waveAnimSeconds ||
-        _waveFieldChanged(oldDelegate.waveField) ||
-        oldDelegate.marineForecastAreas.length != marineForecastAreas.length ||
-        _marineForecastAreasChanged(oldDelegate.marineForecastAreas);
-  }
-
-  bool _marineForecastAreasChanged(List<MarineForecastAreaPolygon> old) {
-    // Compared by [MarineForecastAreaPolygon.id], not list position (2026-
-    // 07-30 Agent review fix): unlike _waveFieldChanged's fixed-order sample
-    // grid, this list's order comes from a Map's iteration order in
-    // map_screen.dart, which can shift between fetches (different regional-
-    // office bulletin order, an area appearing/disappearing) even when the
-    // total count is unchanged — comparing old[i] against new[i] by index
-    // could then diff two *different* areas' heights against each other,
-    // missing a real change or triggering a spurious one. Polygons
-    // themselves never change at runtime (bundled asset, loaded once at
-    // startup), so only the height value needs comparing once matched by id.
-    final oldById = {for (final a in old) a.id: a.heightM};
-    for (final area in marineForecastAreas) {
-      if (oldById[area.id] != area.heightM) return true;
-    }
-    return false;
+        _waveFieldChanged(oldDelegate.waveField);
   }
 
   bool _waveFieldChanged(List<WaveFieldSample> old) {

@@ -40,7 +40,3 @@ flutter:
     - assets/coastline/
     - assets/ship_icon01.png
     - assets/typhoon_icon01.png
-    # 地方海上予報区（VPCY51）の予報区ポリゴン、簡略化済み1ファイル（2026-07-29追加）。
-    # フォルダ丸ごとではなくこのファイル単体を指定（同フォルダ内の
-    # download_marine_areas.ps1・README.mdをアプリに同梱しないため）。
-    - assets/marine_areas/marine_areas.json

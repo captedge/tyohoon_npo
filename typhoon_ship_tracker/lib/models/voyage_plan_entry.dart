@@ -1,3 +1,5 @@
+import 'package:flutter/material.dart';
+
 import 'ship_waypoint.dart';
 
 /// One registered passage-plan CSV, shown as a row in `MapScreen`'s Passage
@@ -16,6 +18,7 @@ class VoyagePlanEntry {
     required this.departureTime,
     this.displayEnabled = true,
     this.sourceCsvFileName,
+    this.colorOverride,
   });
 
   /// Defaults to the imported CSV's filename (without extension) when first
@@ -53,4 +56,12 @@ class VoyagePlanEntry {
   /// into one combined track (an earlier design for a different, since
   /// abandoned, port-call use case; see docs/devlog-passage-plan-multi.md).
   bool displayEnabled;
+
+  /// User-picked override for this route's icon/track color (Passage
+  /// Plan-Edit's "Route Color" swatches, `kShipColorPalette` — see
+  /// `color_palette.dart`), 2026-08-xx addition. Null (the default) means
+  /// "use the automatic per-plan color" — `MapScreen` resolves this via
+  /// `plan.colorOverride ?? _shipColors[i % _shipColors.length]` wherever a
+  /// plan's color is drawn (ship marker, route line, Passage Plan legend).
+  Color? colorOverride;
 }

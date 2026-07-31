@@ -1,14 +1,22 @@
 import 'package:flutter/material.dart';
 
 import '../models/ship_waypoint.dart';
+import '../utils/color_palette.dart';
+import '../utils/deg_min_format.dart';
 import '../utils/voyage_plan.dart';
 
 /// What `VoyagePlanScreen` returns via `Navigator.pop` when the user saves
 /// (null if they cancel).
 class VoyagePlanResult {
-  const VoyagePlanResult({required this.waypoints, required this.departureTime});
+  const VoyagePlanResult({required this.waypoints, required this.departureTime, this.color});
   final List<ShipWaypoint> waypoints;
   final DateTime departureTime;
+
+  /// User-picked "Route Color" override (`kShipColorPalette`), or null for
+  /// "Auto" — the automatic per-plan color assignment map_screen.dart
+  /// already did before this picker existed (2026-08-xx addition). See
+  /// `VoyagePlanEntry.colorOverride`.
+  final Color? color;
 }
 
 /// Table editor for the voyage plan: shows every waypoint (imported from a
@@ -17,18 +25,33 @@ class VoyagePlanResult {
 /// used to compute each waypoint's arrival time (see
 /// `lib/utils/voyage_plan.dart`'s `shipTrackFromWaypoints`).
 ///
-/// Latitude/longitude are edited as decimal degrees here (rather than the
-/// deg-min format used elsewhere in the app) to keep the editor simple for
-/// the first version — see TASKS.md for a possible future deg-min input.
+/// Latitude/longitude are edited as deg-min ("DD-MM.MM", e.g. "35-9.30") —
+/// 2026-07-31 change, matching the format the map screen's cursor lat/lon
+/// readout already used (e.g. "31-15.5N 140-23.4E"), which the user
+/// described as this project's own convention. No hemisphere letter here,
+/// unlike that readout — this app's whole display range (N5-50, E85-170) is
+/// always positive latitude/longitude, so one was judged unnecessary
+/// (confirmed with the user). See `lib/utils/deg_min_format.dart` for the
+/// shared conversion this screen and the cursor readout both use, and its
+/// doc comment for why a silent "reinterpret the same decimal digits as
+/// deg-min" shortcut was rejected in favor of an actual format conversion —
+/// the former would have quietly corrupted any waypoint re-edited after
+/// being imported as plain decimal degrees (e.g. from a CSV).
 class VoyagePlanScreen extends StatefulWidget {
   const VoyagePlanScreen({
     super.key,
     required this.initialWaypoints,
     required this.initialDepartureTime,
+    this.initialColor,
   });
 
   final List<ShipWaypoint> initialWaypoints;
   final DateTime initialDepartureTime;
+
+  /// Previously-saved "Route Color" override, or null when this plan is
+  /// still on the automatic color (2026-08-xx addition) — see
+  /// `VoyagePlanEntry.colorOverride`.
+  final Color? initialColor;
 
   @override
   State<VoyagePlanScreen> createState() => _VoyagePlanScreenState();
@@ -37,12 +60,14 @@ class VoyagePlanScreen extends StatefulWidget {
 class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
   late List<_Row> _rows;
   late DateTime _departureTime;
+  late Color? _selectedColor;
   String? _error;
 
   @override
   void initState() {
     super.initState();
     _departureTime = widget.initialDepartureTime;
+    _selectedColor = widget.initialColor;
     _rows = widget.initialWaypoints.isEmpty
         ? [_Row.empty()]
         : [for (final wp in widget.initialWaypoints) _Row.fromWaypoint(wp)];
@@ -103,14 +128,20 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
     final waypoints = <ShipWaypoint>[];
     for (var i = 0; i < _rows.length; i++) {
       final row = _rows[i];
-      final lat = double.tryParse(row.latController.text.trim());
-      final lon = double.tryParse(row.lonController.text.trim());
+      // deg-min ("DD-MM.MM") parsing (2026-07-31 change, replacing plain
+      // decimal-degree double.tryParse — see this class's doc comment).
+      // parseDegMin already rejects a malformed shape (missing dash, empty
+      // degrees, minutes outside [0, 60)) by returning null, same as
+      // double.tryParse did for a malformed plain number — the range check
+      // right below (lat/lon bounds) is unchanged either way.
+      final lat = parseDegMin(row.latController.text.trim());
+      final lon = parseDegMin(row.lonController.text.trim());
       if (lat == null || lat < -90 || lat > 90) {
-        setState(() => _error = 'WP${i + 1}行目: 緯度が不正です（-90〜90の数値で入力してください）。');
+        setState(() => _error = 'WP${i + 1}行目: 緯度が不正です（例: 35-9.30 の形式で入力してください）。');
         return;
       }
       if (lon == null || lon < -180 || lon > 180) {
-        setState(() => _error = 'WP${i + 1}行目: 経度が不正です（-180〜180の数値で入力してください）。');
+        setState(() => _error = 'WP${i + 1}行目: 経度が不正です（例: 139-39.03 の形式で入力してください）。');
         return;
       }
       final speedText = row.speedController.text.trim();
@@ -140,7 +171,10 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
       return;
     }
 
-    Navigator.pop(context, VoyagePlanResult(waypoints: waypoints, departureTime: _departureTime));
+    Navigator.pop(
+      context,
+      VoyagePlanResult(waypoints: waypoints, departureTime: _departureTime, color: _selectedColor),
+    );
   }
 
   @override
@@ -177,6 +211,37 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
               ],
             ),
           ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+            child: Row(
+              children: [
+                const Text('Route Color:', style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(width: 8),
+                // "Auto" swatch (2026-08-xx addition): resets to the
+                // automatic per-plan color assignment (null override — see
+                // VoyagePlanEntry.colorOverride) this app already used
+                // before this picker existed. Drawn as a hollow/grey circle
+                // so it doesn't read as "one more color choice" among the
+                // actual palette swatches below.
+                _colorSwatch(
+                  color: Colors.white,
+                  selected: _selectedColor == null,
+                  onTap: () => setState(() => _selectedColor = null),
+                  child: Icon(Icons.block, size: 14, color: Colors.grey.shade500),
+                ),
+                const SizedBox(width: 6),
+                for (final c in kShipColorPalette)
+                  Padding(
+                    padding: const EdgeInsets.only(right: 6),
+                    child: _colorSwatch(
+                      color: c,
+                      selected: _selectedColor == c,
+                      onTap: () => setState(() => _selectedColor = c),
+                    ),
+                  ),
+              ],
+            ),
+          ),
           if (_error != null)
             Container(
               width: double.infinity,
@@ -205,8 +270,8 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
       child: Row(
         children: const [
           SizedBox(width: 40, child: Text('No.', style: style)),
-          Expanded(flex: 2, child: Text('Lat (deg)', style: style)),
-          Expanded(flex: 2, child: Text('Lon (deg)', style: style)),
+          Expanded(flex: 2, child: Text('Lat (deg-min)', style: style)),
+          Expanded(flex: 2, child: Text('Lon (deg-min)', style: style)),
           Expanded(flex: 2, child: Text('Speed [kn]', style: style)),
           Expanded(flex: 3, child: Text('Name', style: style)),
           SizedBox(width: 96, child: Text('', style: style)),
@@ -223,9 +288,9 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
       child: Row(
         children: [
           SizedBox(width: 40, child: Text('$index')),
-          Expanded(flex: 2, child: _cellField(row.latController, 'e.g. 35.4093')),
+          Expanded(flex: 2, child: _cellField(row.latController, 'e.g. 35-24.56')),
           const SizedBox(width: 4),
-          Expanded(flex: 2, child: _cellField(row.lonController, 'e.g. 139.6505')),
+          Expanded(flex: 2, child: _cellField(row.lonController, 'e.g. 139-39.03')),
           const SizedBox(width: 4),
           Expanded(
             flex: 2,
@@ -259,6 +324,36 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
     );
   }
 
+  // One round color swatch for the Route Color row above (2026-08-xx
+  // addition) — 22px diameter per the design spec, with a thicker black
+  // border when selected so the current choice reads clearly at a glance.
+  // [child], if given, is centered on top of the fill color (used only by
+  // the "Auto" swatch's icon above).
+  Widget _colorSwatch({
+    required Color color,
+    required bool selected,
+    required VoidCallback onTap,
+    Widget? child,
+  }) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        width: 22,
+        height: 22,
+        alignment: Alignment.center,
+        decoration: BoxDecoration(
+          color: color,
+          shape: BoxShape.circle,
+          border: Border.all(
+            color: selected ? Colors.black : Colors.grey.shade400,
+            width: selected ? 2.5 : 1,
+          ),
+        ),
+        child: child,
+      ),
+    );
+  }
+
   Widget _cellField(TextEditingController controller, String hint, {bool enabled = true}) {
     return TextField(
       controller: controller,
@@ -279,8 +374,8 @@ class _VoyagePlanScreenState extends State<VoyagePlanScreen> {
 /// isn't lost when other rows are inserted/deleted.
 class _Row {
   _Row.fromWaypoint(ShipWaypoint wp)
-      : latController = TextEditingController(text: wp.latitude.toStringAsFixed(4)),
-        lonController = TextEditingController(text: wp.longitude.toStringAsFixed(4)),
+      : latController = TextEditingController(text: formatDegMin(wp.latitude)),
+        lonController = TextEditingController(text: formatDegMin(wp.longitude)),
         speedController = TextEditingController(text: wp.speedKn?.toStringAsFixed(1) ?? ''),
         nameController = TextEditingController(text: wp.name);
 

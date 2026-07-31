@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/ship_waypoint.dart';
@@ -23,10 +24,6 @@ import '../models/voyage_plan_entry.dart';
 /// `parseJmaTyphoonXml` on load — this is an offline-use cache of a manual
 /// fetch, not a periodic background fetch (scope decided with the user
 /// 2026-07-29: data-usage concerns rule out auto-fetching on a schedule).
-/// The marine forecast (地方海上予報, VPCY51) layer added 2026-07-30 follows
-/// the same "store raw XML, re-parse on load" pattern via `parseJmaMarineXml`
-/// but is a top-level field (not per-typhoon-slot) since it's one nationwide
-/// layer, not tied to any particular typhoon.
 ///
 /// Everything is stored as a single JSON blob under one SharedPreferences
 /// key — this app has no need for querying individual fields, and a single
@@ -47,26 +44,11 @@ class AppStateStorage {
     required double playbackSpeed,
     required List<VoyagePlanEntry> voyagePlans,
     required List<TyphoonSlotSnapshot> typhoonSlots,
-    required List<String> marineForecastRawXmls,
-    required DateTime? marineForecastFetchedAtJst,
-    required bool marineForecastDisplayEnabled,
   }) async {
     final prefs = await SharedPreferences.getInstance();
     final json = <String, dynamic>{
       'shipName': shipName,
       'playbackSpeed': playbackSpeed,
-      // Marine forecast (地方海上予報, VPCY51) offline cache (2026-07-30
-      // addition, mainline feature — see map_screen.dart's Information
-      // dialog "Marine Forecast" section): same "store raw, re-parse on
-      // load" convention as the typhoon slots' jmaRawXml below, except this
-      // isn't per-slot — one nationwide layer, so it's a top-level field
-      // rather than living inside typhoonSlots. [marineForecastRawXmls] can
-      // hold more than one bulletin (multiple regional offices each publish
-      // their own VPCY51 covering different sea areas — see
-      // jma_marine_feed_fetcher.dart's _findVpcy51Urls doc comment).
-      'marineForecastRawXmls': marineForecastRawXmls,
-      'marineForecastFetchedAtJst': marineForecastFetchedAtJst?.toIso8601String(),
-      'marineForecastDisplayEnabled': marineForecastDisplayEnabled,
       'voyagePlans': [
         for (final plan in voyagePlans)
           {
@@ -74,6 +56,12 @@ class AppStateStorage {
             'departureTime': plan.departureTime.toIso8601String(),
             'displayEnabled': plan.displayEnabled,
             'sourceCsvFileName': plan.sourceCsvFileName,
+            // Route Color override (2026-08-xx addition, kShipColorPalette —
+            // see color_palette.dart): stored as the 32-bit ARGB int
+            // Color.value round-trips through, null/absent when this plan is
+            // still on the automatic per-plan color (see
+            // VoyagePlanEntry.colorOverride's doc comment).
+            'colorOverride': plan.colorOverride?.value,
             'waypoints': [
               for (final wp in plan.waypoints)
                 {
@@ -100,6 +88,11 @@ class AppStateStorage {
             // jtwcRingsEnabled when rings became per-source — same backward
             // -compatibility reasoning as "displayEnabled" above).
             'ringsEnabled': slot.jtwcRingsEnabled,
+            // Track color override (2026-08-xx addition, kTyphoonColorPalette
+            // — see color_palette.dart), same "store the ARGB int, null when
+            // still on the source's default color" convention as
+            // voyagePlans' colorOverride above.
+            'jtwcColorOverride': slot.jtwcColorOverride?.value,
             // JMA offline cache (2026-07-29 addition): the raw bulletin XML
             // from the last successful "Fetch from JMA" press, re-parsed on
             // load — same "store raw, re-parse" convention as pastedText
@@ -116,6 +109,7 @@ class AppStateStorage {
             'jmaFetchedAtJst': slot.jmaFetchedAtJst?.toIso8601String(),
             'jmaDisplayEnabled': slot.jmaDisplayEnabled,
             'jmaRingsEnabled': slot.jmaRingsEnabled,
+            'jmaColorOverride': slot.jmaColorOverride?.value,
           },
       ],
     };
@@ -148,6 +142,10 @@ class AppStateStorage {
           // null is the correct "unknown source" value for those, same as
           // a freshly-constructed VoyagePlanEntry with no source given.
           sourceCsvFileName: planMap['sourceCsvFileName'] as String?,
+          // Absent for plans saved before this field existed (2026-08-xx) —
+          // null is the correct "still on the automatic color" value, same
+          // treatment as sourceCsvFileName above.
+          colorOverride: planMap['colorOverride'] == null ? null : Color(planMap['colorOverride'] as int),
         ));
       }
       final typhoonSlots = <TyphoonSlotSnapshot>[
@@ -156,6 +154,10 @@ class AppStateStorage {
             pastedText: (slotJson as Map<String, dynamic>)['pastedText'] as String? ?? '',
             jtwcDisplayEnabled: slotJson['displayEnabled'] as bool? ?? true,
             jtwcRingsEnabled: slotJson['ringsEnabled'] as bool? ?? true,
+            // Absent for state saved before this field existed (2026-08-xx) —
+            // null is the correct "still on the default color" value.
+            jtwcColorOverride:
+                slotJson['jtwcColorOverride'] == null ? null : Color(slotJson['jtwcColorOverride'] as int),
             // Absent for state saved before this field existed (2026-07-29) —
             // null is the correct "nothing cached yet" value, same treatment
             // as VoyagePlanEntry.sourceCsvFileName above.
@@ -165,6 +167,8 @@ class AppStateStorage {
                 : DateTime.parse(slotJson['jmaFetchedAtJst'] as String),
             jmaDisplayEnabled: slotJson['jmaDisplayEnabled'] as bool? ?? false,
             jmaRingsEnabled: slotJson['jmaRingsEnabled'] as bool? ?? true,
+            jmaColorOverride:
+                slotJson['jmaColorOverride'] == null ? null : Color(slotJson['jmaColorOverride'] as int),
           ),
       ];
       return AppStateSnapshot(
@@ -172,16 +176,6 @@ class AppStateStorage {
         playbackSpeed: (json['playbackSpeed'] as num?)?.toDouble() ?? 0.5,
         voyagePlans: voyagePlans,
         typhoonSlots: typhoonSlots,
-        // Absent for state saved before this feature existed (2026-07-30) —
-        // empty/null/false are the correct "nothing cached yet, layer off"
-        // defaults, same treatment as jmaRawXml above.
-        marineForecastRawXmls: [
-          for (final x in (json['marineForecastRawXmls'] as List? ?? const [])) x as String,
-        ],
-        marineForecastFetchedAtJst: (json['marineForecastFetchedAtJst'] as String?) == null
-            ? null
-            : DateTime.parse(json['marineForecastFetchedAtJst'] as String),
-        marineForecastDisplayEnabled: json['marineForecastDisplayEnabled'] as bool? ?? false,
       );
     } catch (_) {
       // Malformed/unreadable saved state — treat as "nothing saved" rather
@@ -209,15 +203,23 @@ class TyphoonSlotSnapshot {
     required this.pastedText,
     required this.jtwcDisplayEnabled,
     required this.jtwcRingsEnabled,
+    this.jtwcColorOverride,
     this.jmaRawXml,
     this.jmaFetchedAtJst,
     required this.jmaDisplayEnabled,
     required this.jmaRingsEnabled,
+    this.jmaColorOverride,
   });
 
   final String pastedText;
   final bool jtwcDisplayEnabled;
   final bool jtwcRingsEnabled;
+
+  /// Track/marker color override (2026-08-xx addition, Forecast dialog's
+  /// per-source color swatches — see color_palette.dart's
+  /// `kTyphoonColorPalette`) — null means "use the source's usual fixed
+  /// default color" (map_screen.dart's `_jtwcColor`).
+  final Color? jtwcColorOverride;
 
   /// Offline cache of the last successful "Fetch from JMA" (2026-07-29
   /// addition — scope decided with the user: no periodic auto-fetch, manual
@@ -233,6 +235,10 @@ class TyphoonSlotSnapshot {
   final DateTime? jmaFetchedAtJst;
   final bool jmaDisplayEnabled;
   final bool jmaRingsEnabled;
+
+  /// Same as [jtwcColorOverride], for the JMA source (map_screen.dart's
+  /// `_jmaColor` default).
+  final Color? jmaColorOverride;
 }
 
 /// Result of [AppStateStorage.load]: everything map_screen.dart needs to
@@ -245,20 +251,10 @@ class AppStateSnapshot {
     required this.playbackSpeed,
     required this.voyagePlans,
     required this.typhoonSlots,
-    required this.marineForecastRawXmls,
-    required this.marineForecastFetchedAtJst,
-    required this.marineForecastDisplayEnabled,
   });
 
   final String shipName;
   final double playbackSpeed;
   final List<VoyagePlanEntry> voyagePlans;
   final List<TyphoonSlotSnapshot> typhoonSlots;
-
-  /// Marine forecast (地方海上予報, VPCY51) offline cache — see
-  /// [AppStateStorage.save]'s doc comment on the same fields for why this
-  /// lives at the top level rather than inside [TyphoonSlotSnapshot].
-  final List<String> marineForecastRawXmls;
-  final DateTime? marineForecastFetchedAtJst;
-  final bool marineForecastDisplayEnabled;
 }
