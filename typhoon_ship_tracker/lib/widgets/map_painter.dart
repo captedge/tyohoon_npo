@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../utils/color_palette.dart';
 import '../utils/interpolation.dart';
 import '../utils/map_bounds.dart';
 
@@ -225,9 +226,21 @@ class MapPainter extends CustomPainter {
   /// until that load completes, in which case the previous placeholder
   /// shape is drawn instead so the map isn't left blank while the asset
   /// decodes (same "graceful until loaded" pattern as CoastlineData.empty).
-  /// [shipIcon] is shared by every entry in [ships] — all routes use the
-  /// same icon graphic, distinguished by their [ShipMarker.label] instead.
-  final ui.Image? shipIcon;
+  ///
+  /// 2026-07-31: [shipIcon] (a single shared image, recolored per route via
+  /// a `ColorFilter.mode(ship.color, BlendMode.srcIn)` silhouette tint —
+  /// see the old _drawShip) was replaced with [shipIcons], a list of 10
+  /// already-colored images (`assets/ship_01.png`..`ship_10.png`,
+  /// index-aligned with color_palette.dart's `kShipColorPalette` — user-
+  /// supplied artwork matching that exact palette, one hull color each).
+  /// [ShipMarker.color] is always one of `kShipColorPalette` (automatic
+  /// per-route assignment and the Passage Plan color picker both draw from
+  /// that same list — see VoyagePlanScreen), so `_drawShip` looks up
+  /// `kShipColorPalette.indexOf(ship.color)` to pick the matching entry
+  /// here instead of tinting a single shared image. An entry is null until
+  /// its own asset finishes decoding (same graceful-degrade pattern as
+  /// before, per icon instead of once globally).
+  final List<ui.Image?> shipIcons;
   final ui.Image? typhoonIcon;
 
   /// Wave field overlay samples (2026-07-29, personal build only — always
@@ -249,7 +262,7 @@ class MapPainter extends CustomPainter {
     this.coastlinePolygons = const [],
     this.typhoons = const [],
     this.zoom = 1.0,
-    this.shipIcon,
+    this.shipIcons = const [],
     this.typhoonIcon,
     this.waveField = const [],
     this.waveAnimSeconds = 0,
@@ -718,7 +731,7 @@ class MapPainter extends CustomPainter {
     Color color, {
     Offset extraOffset = Offset.zero,
   }) {
-    const style = TextStyle(color: Colors.white, fontSize: 12, fontWeight: FontWeight.w700);
+    const style = TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.w700);
     final painter = TextPainter(
       text: TextSpan(text: '${distanceNm.round()} nm', style: style),
       textDirection: TextDirection.ltr,
@@ -838,23 +851,44 @@ class MapPainter extends CustomPainter {
   // constant on-screen size at any map zoom, instead of growing/shrinking
   // with it. The heading angle itself is still computed from the real
   // (non-fixed-scale) scene offsets — a geometry question, not a sizing one.
-  // Ship icon: assets/ship_icon01.png, bow drawn pointing "up" in the
-  // source image — same up-is-north convention the previous placeholder
-  // triangle used, so the existing heading-rotation math (angle=0 → apex/
-  // bow pointing up) applies unchanged. Anchored not at its own center but
-  // at (horizontal center, 15% up from the bottom edge) per the 2026-08-xx
-  // request, i.e. near the stern/keel notch visible in the artwork — that
-  // point, not the image's bounding-box center, is what's placed at the
-  // ship's actual lat/lon and what canvas.rotate below pivots around.
+  // Ship icon: assets/ship_01.png..ship_10.png (2026-07-31: replaced the
+  // single assets/ship_icon01.png + ColorFilter-tint approach — see
+  // [shipIcons]' doc comment), bow drawn pointing "up" in the source image
+  // (confirmed by measuring each image's alpha-mass principal axis before
+  // wiring this up — all 10 come out ~0deg from vertical, same convention
+  // the old single icon and the placeholder triangle before it both used),
+  // so the existing heading-rotation math (angle=0 → bow pointing up)
+  // applies unchanged. Anchored not at its own center but at (horizontal
+  // center, 25% up from the bottom edge of the full image *including its
+  // transparent margin*) per the 2026-07-31 request — up from 15% because
+  // the new artwork carries a much larger bottom margin than the old single
+  // icon did (~15% of canvas height vs. the old ~4%): 25% of the new
+  // canvas lands at essentially the same point on the actual hull (measured
+  // near the stern/keel notch) that 15% used to land on the old, tighter-
+  // cropped canvas — this is a margin-size compensation, not a change to
+  // *where on the ship* the anchor sits. That point, not the image's
+  // bounding-box center, is what's placed at the ship's actual lat/lon and
+  // what canvas.rotate below pivots around.
   //
   // 2026-08-xx: this now draws one [ShipMarker] at a time (called in a loop
   // from paint()) instead of the single ship this painter used to carry —
   // multiple routes (e.g. comparing destination options from the same
   // departure port/time) can be on screen at once, each with its own icon,
   // label, and distance-to-typhoon readout.
-  static const double _shipIconDisplayHeightPx = 26.0;
+  //
+  // 2026-07-31: _shipIconDisplayHeightPx raised from 26.0 to 30.0 to keep
+  // the ship's on-screen *length* (hull bounding-box height, since these are
+  // top-down bow-up icons) roughly the same as before, despite the new
+  // artwork's much larger transparent margins. The old icon's visible hull
+  // was ~94% of its (non-square) canvas height; the new 10 icons' visible
+  // hull is only ~81% of their (square) canvas height, fairly uniformly
+  // across all 10 (measured 81.2-81.7%). Solving
+  // oldDisplayHeight(26) * oldHullFrac(0.942) = newDisplayHeight * newHullFrac(~0.813)
+  // gives ~30.1px; 30.0 is close enough (<0.4% off) that a single shared
+  // constant works fine across all 10 images rather than one per color.
+  static const double _shipIconDisplayHeightPx = 30.0;
   static const double _shipIconAnchorXFrac = 0.5;
-  static const double _shipIconAnchorYFrac = 0.85; // 15% up from the bottom
+  static const double _shipIconAnchorYFrac = 0.75; // 25% up from the bottom
 
   void _drawShip(Canvas canvas, ShipMarker ship) {
     final o = MapBounds.toOffset(ship.position.latitude, ship.position.longitude);
@@ -875,7 +909,16 @@ class MapPainter extends CustomPainter {
     canvas.scale(_invZoom);
     canvas.rotate(angle);
 
-    final icon = shipIcon;
+    // 2026-07-31: look up this route's own pre-colored image by matching
+    // its color against kShipColorPalette (ship.color is always one of
+    // these 10 — see [shipIcons]' doc comment) instead of tinting a single
+    // shared image. `indexOf` returning -1 (a color outside the palette,
+    // which shouldn't currently be reachable) falls back to the first
+    // loaded icon rather than drawing nothing.
+    final paletteIndex = kShipColorPalette.indexOf(ship.color);
+    final icon = paletteIndex >= 0 && paletteIndex < shipIcons.length
+        ? shipIcons[paletteIndex]
+        : (shipIcons.isNotEmpty ? shipIcons.firstWhere((i) => i != null, orElse: () => null) : null);
     if (icon != null) {
       final displayHeight = _shipIconDisplayHeightPx;
       final displayWidth = displayHeight * icon.width / icon.height;
@@ -885,15 +928,10 @@ class MapPainter extends CustomPainter {
         icon,
         Rect.fromLTWH(0, 0, icon.width.toDouble(), icon.height.toDouble()),
         Rect.fromLTWH(-anchorX, -anchorY, displayWidth, displayHeight),
-        // Tinted to this route's color (2026-08-xx: distinguish multiple
-        // routes compared from the same departure port/time) via a srcIn
-        // color filter — this replaces the icon's own shading with a flat
-        // silhouette in [ship.color], which reads clearly as "this route's
-        // color" at the map's small icon size, at the cost of the original
-        // artwork's shading detail.
-        Paint()
-          ..filterQuality = FilterQuality.medium
-          ..colorFilter = ColorFilter.mode(ship.color, BlendMode.srcIn),
+        // No color filter (2026-07-31): the image itself is already this
+        // route's color (unlike the old single-icon + srcIn-tint approach),
+        // so this just draws the artwork's own shading as-is.
+        Paint()..filterQuality = FilterQuality.medium,
       );
     } else {
       // Fallback while the icon asset is still decoding (loadUiImage is
@@ -1157,7 +1195,7 @@ class MapPainter extends CustomPainter {
   bool shouldRepaint(covariant MapPainter oldDelegate) {
     return oldDelegate.coastlinePolygons.length != coastlinePolygons.length ||
         oldDelegate.zoom != zoom ||
-        oldDelegate.shipIcon != shipIcon ||
+        _shipIconsChanged(oldDelegate.shipIcons) ||
         oldDelegate.typhoonIcon != typhoonIcon ||
         oldDelegate.ships.length != ships.length ||
         _shipsChanged(oldDelegate.ships) ||
@@ -1179,6 +1217,23 @@ class MapPainter extends CustomPainter {
           old[i].directionDeg != waveField[i].directionDeg) {
         return true;
       }
+    }
+    return false;
+  }
+
+  // 2026-07-31: element-wise comparison instead of `old != shipIcons`
+  // (list identity) — map_screen.dart's `_shipIcons` field is replaced
+  // wholesale (copy-then-set) each time an icon finishes loading rather
+  // than mutated in place, specifically so this comparison can tell old
+  // and new apart; see that field's doc comment for the in-place-mutation
+  // pitfall this avoids. Length can differ only very transiently (never in
+  // practice, since the list is always constructed at
+  // kShipColorPalette.length and never resized), so this also treats a
+  // length mismatch as "changed" defensively.
+  bool _shipIconsChanged(List<ui.Image?> old) {
+    if (old.length != shipIcons.length) return true;
+    for (var i = 0; i < shipIcons.length; i++) {
+      if (old[i] != shipIcons[i]) return true;
     }
     return false;
   }

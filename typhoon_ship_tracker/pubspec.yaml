@@ -38,5 +38,14 @@ flutter:
   uses-material-design: true
   assets:
     - assets/coastline/
-    - assets/ship_icon01.png
+    - assets/ship_01.png
+    - assets/ship_02.png
+    - assets/ship_03.png
+    - assets/ship_04.png
+    - assets/ship_05.png
+    - assets/ship_06.png
+    - assets/ship_07.png
+    - assets/ship_08.png
+    - assets/ship_09.png
+    - assets/ship_10.png
     - assets/typhoon_icon01.png

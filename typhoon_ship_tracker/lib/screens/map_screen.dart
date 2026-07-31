@@ -223,7 +223,32 @@ class _MapScreenState extends State<MapScreen> {
   // placeholder triangle/circle with assets/ship_icon01.png and
   // assets/typhoon_icon01.png). Null until loaded — MapPainter falls back
   // to the old placeholder shapes for the frame(s) before that.
-  ui.Image? _shipIcon;
+  //
+  // 2026-07-31: the single tinted ship_icon01.png (recolored per route via a
+  // ColorFilter, see map_painter.dart's old _drawShip) was replaced with 10
+  // dedicated pre-colored images (assets/ship_01.png..ship_10.png, one per
+  // entry of color_palette.dart's kShipColorPalette, same order — user
+  // supplied these to match the palette exactly, confirmed by sampling each
+  // image's average RGB against the palette hex codes before wiring this
+  // up). _shipIcons is index-aligned with kShipColorPalette; MapPainter
+  // looks up `kShipColorPalette.indexOf(ship.color)` to pick the matching
+  // entry instead of tinting a single shared image. Ship colors always come
+  // from kShipColorPalette (automatic assignment or the Passage Plan color
+  // picker both draw from this same list — see VoyagePlanScreen's color
+  // picker), so every ship always resolves to one of these 10.
+  //
+  // Deliberately *not* final, and never mutated in place (no `_shipIcons[i]
+  // = image`): each load below replaces the whole field with a new list
+  // (copy-then-set) via setState, mirroring how the old single `_shipIcon`
+  // field worked (reassigned, not mutated). This matters because
+  // MapPainter.shouldRepaint's element-wise comparison (`_shipIconsChanged`,
+  // map_painter.dart) is run against `oldDelegate.shipIcons` — if this field
+  // were mutated in place instead of reassigned, every MapPainter build (old
+  // delegate and new delegate alike) would still be pointing at the exact
+  // same list object by the time shouldRepaint runs, so there'd be nothing
+  // left to compare against and a freshly-decoded icon could sit unused
+  // until some unrelated repaint happened to fire.
+  List<ui.Image?> _shipIcons = List<ui.Image?>.filled(kShipColorPalette.length, null);
   ui.Image? _typhoonIcon;
 
   // User-entered ship name (2026-07-28 request: NAVTOR-format voyage-plan
@@ -401,9 +426,20 @@ class _MapScreenState extends State<MapScreen> {
     CoastlineData.load().then((data) {
       if (mounted) setState(() => _coastline = data);
     });
-    loadUiImage('assets/ship_icon01.png').then((image) {
-      if (mounted) setState(() => _shipIcon = image);
-    });
+    for (var i = 0; i < kShipColorPalette.length; i++) {
+      final assetPath = 'assets/ship_${(i + 1).toString().padLeft(2, '0')}.png';
+      loadUiImage(assetPath).then((image) {
+        // Copy-then-set (not `_shipIcons[i] = image`) — see _shipIcons'
+        // doc comment for why in-place mutation would break shouldRepaint.
+        if (mounted) {
+          setState(() {
+            final updated = List<ui.Image?>.of(_shipIcons);
+            updated[i] = image;
+            _shipIcons = updated;
+          });
+        }
+      });
+    }
     loadUiImage('assets/typhoon_icon01.png').then((image) {
       if (mounted) setState(() => _typhoonIcon = image);
     });
@@ -2910,7 +2946,7 @@ class _MapScreenState extends State<MapScreen> {
                             coastlinePolygons: _coastline.polygons,
                             zoom: _zoom,
                             typhoons: typhoons,
-                            shipIcon: _shipIcon,
+                            shipIcons: _shipIcons,
                             typhoonIcon: _typhoonIcon,
                             // Always the empty default in a mainline build —
                             // see _currentWaveFieldSamples' doc comment and
