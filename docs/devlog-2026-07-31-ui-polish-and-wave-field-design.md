@@ -10,6 +10,14 @@
 
 「個人用：Open-Meteo marine (trial)メニュー削除」については、ユーザーが言及した独立メニュー自体が2026-07-30の全面再設計で既にForecast内のWave Fieldセクションへ統合・廃止済みで、AppBar上にそれらしきボタンが見当たらなかった。ユーザーの記憶とコードの実態がずれている可能性を考慮し、削除は実施せずTASKS.mdの「決定待ち」に記録、次回Windows実機の画面で再確認する方針とした。
 
+### 検証で確認した実装内容の詳細（CLAUDE.mdの圧縮に伴いここへ集約、2026-07-31）
+
+- **AppBar構成**：左から「Passage Plan」（船アイコン）「Forecast」（旧称「Information」、鉛筆アイコン）の2つのみ。Ship's Nameは「Information」から「Passage Plan」ダイアログ上部（プラン一覧より上）に移動済み。
+- **Range Ring**：旧称「100/200nm rings」。AppBarの独立メニューを廃止し、「Forecast」内の台風スロットごと・ソース（JTWC/JMA）ごとにチェックボックスでOn/Off。起動時デフォルトOn（2026-07-27確定の挙動をそのまま維持）。地図上のアイコンクリックによるOn/Off切替は従来通り。
+- **台風の凡例ボックス**：画面右上（緯度経度ラベル・ズームバーと干渉しない位置、`right: 64`）にタイトル「Typhoon」で表示（2026-07-31追加）。Passage Plan凡例（画面左上）と対になる構成。
+- **手動での色選択機能**（2026-07-31確認）：自動色分け（船10色パレット、台風JTWC＝赤／JMA＝オレンジ）はデフォルトのまま変更なし。手動上書きが可能：船は「Passage Plan」の「Edit CSV」から`VoyagePlanEntry.colorOverride`、台風は「Forecast」内の各台風スロットから`jtwcColorOverride`/`jmaColorOverride`で、それぞれ用意されたカラーパレットから選択できる。
+- **VPCY51関連の削除済みファイル一覧**（本セッション開始時点で既にコード上から削除済みだったことを確認）：`lib/utils/marine_areas.dart`／`marine_area_codes.dart`／`jma_marine_xml_parser.dart`／`jma_marine_feed_fetcher.dart`、`MapPainter`の区域塗り分け描画、Informationダイアログの該当セクション、`AppStateStorage`の永続化フィールド。本セッションで追加削除したのは孤立していた`assets/marine_areas/`一式と`pubspec.yaml`の該当行のみ。海上気象データは②Open-Meteo波の場（個人用）のみが残る。
+
 ## ②台風の軌跡情報ボックスとズームバーの干渉修正
 
 ユーザー報告「台風の軌跡情報ボックス：再生バーに干渉しています」を受け、文言通り画面下部の再生バーとの衝突を疑い、`_buildTyphoonLegend`に高さ制限（ConstrainedBox＋SingleChildScrollView）を先に実装した。しかし2枚目のスクリーンショットとユーザーからの訂正「再生バーではなく『ズームバー』との干渉でした」で、実際の原因は別にあると判明。

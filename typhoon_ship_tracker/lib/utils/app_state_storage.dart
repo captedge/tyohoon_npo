@@ -1,8 +1,10 @@
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import 'portable_storage_dir.dart';
 import '../models/ship_waypoint.dart';
 import '../models/voyage_plan_entry.dart';
 
@@ -25,14 +27,34 @@ import '../models/voyage_plan_entry.dart';
 /// fetch, not a periodic background fetch (scope decided with the user
 /// 2026-07-29: data-usage concerns rule out auto-fetching on a schedule).
 ///
-/// Everything is stored as a single JSON blob under one SharedPreferences
-/// key — this app has no need for querying individual fields, and a single
-/// key keeps load/save atomic from this app's point of view (no risk of a
-/// half-written set of keys after a crash mid-save).
+/// Everything is stored as a single JSON blob in one file under [appDataDir]
+/// (`portable_storage_dir.dart`) — this app has no need for querying
+/// individual fields, and a single file keeps load/save atomic from this
+/// app's point of view (no risk of a half-written set of keys after a crash
+/// mid-save).
+///
+/// **2026-08 change**: this used to go through `SharedPreferences` (which on
+/// Windows stores its own JSON file under the OS's per-user "application
+/// support" directory). Moved to a plain file under [appDataDir] instead so
+/// that on Windows it lives in a `UserData` folder next to the exe — inside the
+/// portable Zip's extracted folder — and travels with a copy of that folder
+/// to another PC (see `docs/devlog-portable-data-dir.md`). [load] still
+/// falls back to the old `SharedPreferences` key once, as a one-time,
+/// non-destructive migration for a device that already had state saved
+/// there — see its doc comment.
 class AppStateStorage {
   AppStateStorage._();
 
-  static const _prefsKey = 'typhoon_ship_tracker.app_state.v1';
+  static const _fileName = 'app_state.v1.json';
+
+  /// Pre-2026-08 storage key — read-only now, kept solely for the one-time
+  /// migration fallback in [load].
+  static const _legacyPrefsKey = 'typhoon_ship_tracker.app_state.v1';
+
+  static Future<File> _file() async {
+    final dir = await appDataDir();
+    return File('${dir.path}${Platform.pathSeparator}$_fileName');
+  }
 
   /// Saves the current state. Fire-and-forget from the caller's point of
   /// view (callers don't `await` this — see map_screen.dart's `_saveState`
@@ -45,7 +67,6 @@ class AppStateStorage {
     required List<VoyagePlanEntry> voyagePlans,
     required List<TyphoonSlotSnapshot> typhoonSlots,
   }) async {
-    final prefs = await SharedPreferences.getInstance();
     final json = <String, dynamic>{
       'shipName': shipName,
       'playbackSpeed': playbackSpeed,
@@ -113,7 +134,8 @@ class AppStateStorage {
           },
       ],
     };
-    await prefs.setString(_prefsKey, jsonEncode(json));
+    final file = await _file();
+    await file.writeAsString(jsonEncode(json));
   }
 
   /// Loads previously-saved state, or null if nothing was saved yet (first
@@ -121,10 +143,34 @@ class AppStateStorage {
   /// changed the shape — fails safe by falling back to the built-in sample
   /// data, same as a fresh install, rather than crashing on launch).
   static Future<AppStateSnapshot?> load() async {
-    final prefs = await SharedPreferences.getInstance();
-    final raw = prefs.getString(_prefsKey);
-    if (raw == null) return null;
+    // Whole method (file I/O + parsing) is one try/catch — a read/exists
+    // check throwing (e.g. a permissions error, a half-written file) must
+    // fail safe the same way a JSON parse error already does, not propagate
+    // and crash the app on launch (see doc comment above).
     try {
+      final file = await _file();
+      String? raw;
+      if (await file.exists()) {
+        raw = await file.readAsString();
+      } else if (Platform.isWindows) {
+        // One-time migration (2026-08 change, see class doc above): the new
+        // file doesn't exist yet — check the old SharedPreferences-backed
+        // location so a device that already had saved state doesn't see it
+        // vanish after upgrading to a build with this change. Copies the raw
+        // JSON straight into the new file (best-effort) so this only has to
+        // happen once; the parse below is shared with the normal path.
+        final prefs = await SharedPreferences.getInstance();
+        raw = prefs.getString(_legacyPrefsKey);
+        if (raw != null) {
+          try {
+            await file.writeAsString(raw);
+          } catch (_) {
+            // Best-effort: still use the just-read legacy value for this
+            // session even if the copy-forward write failed.
+          }
+        }
+      }
+      if (raw == null) return null;
       final json = jsonDecode(raw) as Map<String, dynamic>;
       final voyagePlans = <VoyagePlanEntry>[];
       for (final planJson in (json['voyagePlans'] as List? ?? const [])) {

@@ -1,6 +1,6 @@
 import 'dart:io';
 
-import 'package:path_provider/path_provider.dart';
+import 'portable_storage_dir.dart';
 
 /// On-disk library of previously-imported Passage Plan CSVs (2026-07-27
 /// request: "同じファイルを毎回外部から選び直すのではなく、取り込んだCSVを
@@ -31,11 +31,11 @@ import 'package:path_provider/path_provider.dart';
 /// isn't (`_deleteCsvLibraryEntry` implements this policy — this class
 /// itself has no opinion on it, it just deletes the file it's told to).
 ///
-/// Stored under the OS's per-user "application support" directory (the
-/// same directory family `shared_preferences_windows` uses for its own
-/// storage — see docs/completed-log.md), which sits outside the portable
-/// Zip's extracted folder, so it survives replacing that folder with a
-/// newer build.
+/// Stored under [appDataDir] (`portable_storage_dir.dart`) — on Windows a
+/// `UserData/csv_library` folder next to the running exe (2026-08 change, see
+/// `docs/devlog-portable-data-dir.md`: previously this was the OS's per-user
+/// "application support" directory, which didn't travel with a copy of the
+/// portable Zip's folder to another PC).
 class CsvLibrary {
   CsvLibrary._();
 
@@ -46,6 +46,11 @@ class CsvLibrary {
   /// existing entry never increases the count, so it's always allowed.
   static const int maxEntries = 50;
 
+  /// Guards [_migrateFromLegacyIfNeeded] to at most one actual check per
+  /// app launch (it's called from every [_libraryDir] resolution, which
+  /// itself is not cached — see below).
+  static bool _migrationChecked = false;
+
   // Not cached (2026-07-27): re-resolved on every call rather than caching
   // the Directory after first use. This is only ever called from dialog
   // open/action handlers (not a hot path), and always re-creating if
@@ -53,12 +58,40 @@ class CsvLibrary {
   // under the app (e.g. an antivirus quarantine or the user poking around
   // in Explorer) instead of silently failing on a stale cached reference.
   static Future<Directory> _libraryDir() async {
-    final base = await getApplicationSupportDirectory();
+    final base = await appDataDir();
     final dir = Directory('${base.path}${Platform.pathSeparator}csv_library');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
+    await _migrateFromLegacyIfNeeded(dir);
     return dir;
+  }
+
+  /// One-time, non-destructive migration (2026-08 change — see
+  /// `portable_storage_dir.dart`'s doc comment): if this is a Windows build,
+  /// the new library folder is still empty, and CSV files exist in the old
+  /// per-user location, copy them across so a device that already had a CSV
+  /// library doesn't appear to lose it after upgrading to a build with this
+  /// change. The old files are left in place (copy, not move) — harmless
+  /// leftover disk usage is a safer failure mode than a destructive move.
+  static Future<void> _migrateFromLegacyIfNeeded(Directory newDir) async {
+    if (_migrationChecked || !Platform.isWindows) return;
+    _migrationChecked = true;
+    final newDirIsEmpty = await newDir.list().isEmpty;
+    if (!newDirIsEmpty) return;
+    final legacyBase = await legacyAppDataDir();
+    final legacyDir = Directory('${legacyBase.path}${Platform.pathSeparator}csv_library');
+    if (!await legacyDir.exists()) return;
+    final legacyFiles = await legacyDir.list().toList();
+    for (final entry in legacyFiles.whereType<File>()) {
+      final name = entry.uri.pathSegments.last;
+      try {
+        await entry.copy('${newDir.path}${Platform.pathSeparator}$name');
+      } catch (_) {
+        // Best-effort: one unreadable/locked legacy file shouldn't block
+        // migrating the rest.
+      }
+    }
   }
 
   /// Filenames (including the `.csv` extension) currently in the library,

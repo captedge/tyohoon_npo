@@ -1,10 +1,9 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:path_provider/path_provider.dart';
-
 import 'build_flags.dart';
 import 'open_meteo_marine_fetcher.dart';
+import 'portable_storage_dir.dart';
 import 'wave_field.dart';
 
 /// **Personal-build only** (see build_flags.dart's [kPersonalBuild] — every
@@ -120,9 +119,14 @@ const int waveFieldFixedAreaMaxPoints = 500;
 /// re-resolved on every call rather than caching the Directory/File after
 /// first use, so this stays robust if the underlying folder is removed out
 /// from under the app.
+///
+/// **2026-08 change**: resolved under [appDataDir] (`portable_storage_dir.dart`)
+/// instead of the OS's per-user "application support" directory directly —
+/// on Windows this now lives in a `UserData` folder next to the exe, same as
+/// `AppStateStorage`/`CsvLibrary` (see `docs/devlog-portable-data-dir.md`).
 Future<File> _waveFieldCacheFile() async {
-  final base = await getApplicationSupportDirectory();
-  return File('${base.path}${Platform.pathSeparator}wave_field_cache.json');
+  final dir = await appDataDir();
+  return File('${dir.path}${Platform.pathSeparator}wave_field_cache.json');
 }
 
 /// Loads the persisted Display flag + last-imported grid. Returns
@@ -138,8 +142,27 @@ Future<WaveFieldSavedState> loadWaveFieldCache() async {
   );
   try {
     final file = await _waveFieldCacheFile();
-    if (!await file.exists()) return WaveFieldSavedState.empty;
-    final raw = await file.readAsString();
+    String? raw;
+    if (await file.exists()) {
+      raw = await file.readAsString();
+    } else if (Platform.isWindows) {
+      // One-time migration (2026-08 change, see _waveFieldCacheFile doc
+      // above): fall back to the old per-user location so a device that
+      // already had a cached wave field grid doesn't lose it after
+      // upgrading to a build with this change.
+      final legacyBase = await legacyAppDataDir();
+      final legacyFile = File('${legacyBase.path}${Platform.pathSeparator}wave_field_cache.json');
+      if (await legacyFile.exists()) {
+        raw = await legacyFile.readAsString();
+        try {
+          await file.writeAsString(raw);
+        } catch (_) {
+          // Best-effort copy-forward; still use the just-read value below
+          // for this session even if it failed.
+        }
+      }
+    }
+    if (raw == null) return WaveFieldSavedState.empty;
     final decoded = jsonDecode(raw);
     if (decoded is! Map<String, dynamic>) return WaveFieldSavedState.empty;
 

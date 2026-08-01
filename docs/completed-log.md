@@ -5,9 +5,11 @@
 書式：
 `**タイトル**（日付、コミットハッシュ、該当すればブランチ名）— 結論1〜2行。詳細は`docs/devlog-xxx.md`（devlogを作らない軽微な変更なら省略）。`
 
-**台風との距離表示（"N nm"ボックス）の文字色を白から黒に変更**（2026-07-31）— `map_painter.dart`の`_drawDistanceLabel`内`TextStyle`1箇所のみの変更。ボックス自体の塗り（台風の色、不透明度0.92）・黒枠は変更なし。単一プロパティの変更のためAgentレビューは省略、丸括弧・波括弧・角括弧の対応チェックのみ実施（一致）。Coworkサンドボックス（Dart SDKなし）のためコンパイル確認は未実施——Windows機での実機確認が必要（黒文字が台風の塗り色の上で視認しやすいか確認）。
+**保存先をWindowsのper-user AppDataフォルダから、exe相対のDataフォルダ（ポータブルzip内）に変更**（2026-08-01）— ユーザーから「zipフォルダを別PCにコピーしてもデータが引き継がれない」との指摘を受け、原因（`shared_preferences`/`path_provider`がOSのユーザープロファイル配下を指すため）を確認した上で、トレードオフ（`flutter clean`実行時に消える、Debug/Releaseでデータが別になる）を説明・合意の上で実施。新設`lib/utils/portable_storage_dir.dart`＋`app_state_storage.dart`／`csv_library.dart`／`wave_field_cache.dart`の保存先切替、旧保存先からの一度きりの非破壊移行、`build_release.bat`／`build_release_personal.bat`のzip化時の`Data`フォルダ除外（開発者のローカルテストデータ混入防止）を実装。Agentレビューで指摘2件（PowerShellの`-Exclude`がワイルドカード無しで効いていなかった／`app_state_storage.dart`の`load()`のtry/catchスコープ漏れ）を発見・反映済み。**追記（2026-08-01、ユーザーがWindows機で実際にビルド・実行し発覚）**：フォルダ名を当初`Data`にしていたところ、Flutterがビルド時にexeの隣へ自動生成する必須フォルダ`data`（`icudtl.dat`/`flutter_assets`一式）とWindowsの大文字小文字非区別により衝突し、zip除外スクリプトがこの必須フォルダごと除外してしまってアプリが起動しなくなる不具合が発生（ユーザー報告「アプリが立ち上がらないです windows11」）。フォルダ名を`UserData`に改名して解消。原因・教訓は`docs/devlog-portable-data-dir.md`に追記済み。**追記2（2026-08-01）**：ユーザーの実機検証で、`UserData`への改名後も展開したexeが起動しない状態が継続していることが判明。切り分けの結果、`build\windows\...\Release\`のexe直接実行は成功する一方、生成zipには`data`フォルダ（Flutter本体）が含まれていないことが発覚——`Get-ChildItem | Compress-Archive`が大量ファイルを含む`data`フォルダをエラー表示なしに欠落させていたのが原因。zip化を`robocopy`で短いパスへステージングしてから`Compress-Archive`する方式に変更し、ユーザーがWindows機で再ビルド・展開・起動を確認し**起動成功**。原因・再発防止ルール（保存先命名チェック・zip化の注意）は`docs/devlog-portable-data-dir.md`・`docs/operation-rules.md`に追記済み。残りの確認項目（データ移行・別PCコピー・zip内容の完全性）は引き続きTASKS.md参照。
 
-**船アイコンをユーザー提供の色別10種専用画像（`ship_01.png`〜`ship_10.png`）に切替、旧`ColorFilter`着色方式を廃止**（2026-07-31）— `kShipColorPalette`と同順であることを各画像の平均RGB照合で確認した上で実装。表示サイズ（旧比±0.4%以内）・座標アンカー（下から15%→25%、新画像の余白増加分を補正し船体上の相対位置は旧同等）はいずれも数値計算で根拠付け。実装中にリスト要素の直接書き換えでは`shouldRepaint`が変化を検知できない潜在バグを自己発見・修正。Agentレビュー実施、重大な指摘なし。詳細・計算根拠は`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`「⑥」参照。確認済み：文字列内挿入を正しく処理する専用スクリプトで丸括弧・波括弧・角括弧の対応が一致。Coworkサンドボックス（Dart SDKなし）のためコンパイル確認は未実施——Windows機での実機確認が必要（TASKS.md参照）。
+**台風との距離表示（"N nm"ボックス）の文字色を白から黒に変更**（2026-07-31、`main`ブランチ、commit `6b623a6`）— `map_painter.dart`の`_drawDistanceLabel`内`TextStyle`1箇所のみの変更。ボックス自体の塗り（台風の色、不透明度0.92）・黒枠は変更なし。単一プロパティの変更のためAgentレビューは省略、丸括弧・波括弧・角括弧の対応チェックのみ実施（一致）。Coworkサンドボックス（Dart SDKなし）のためコンパイル確認は未実施——Windows機での実機確認が必要（黒文字が台風の塗り色の上で視認しやすいか確認）。
+
+**船アイコンをユーザー提供の色別10種専用画像（`ship_01.png`〜`ship_10.png`）に切替、旧`ColorFilter`着色方式を廃止**（2026-07-31、`main`ブランチ、commit `6b623a6`）— `kShipColorPalette`と同順であることを各画像の平均RGB照合で確認した上で実装。表示サイズ（旧比±0.4%以内）・座標アンカー（下から15%→25%、新画像の余白増加分を補正し船体上の相対位置は旧同等）はいずれも数値計算で根拠付け。実装中にリスト要素の直接書き換えでは`shouldRepaint`が変化を検知できない潜在バグを自己発見・修正。Agentレビュー実施、重大な指摘なし。詳細・計算根拠は`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`「⑥」参照。確認済み：文字列内挿入を正しく処理する専用スクリプトで丸括弧・波括弧・角括弧の対応が一致。Coworkサンドボックス（Dart SDKなし）のためコンパイル確認は未実施——Windows機での実機確認が必要（TASKS.md参照）。
 
 **Passage Plan編集画面の緯度経度入力を10進度から度分（deg-min）形式に変更**（2026-07-31）— 地図画面のカーソル表示と統一した「35-15.50」形式に変更、新規`lib/utils/deg_min_format.dart`に変換ロジックを集約。詳細は`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`参照。
 
@@ -99,7 +101,7 @@
 
 **地図表示・距離計算・データ取得方式の決定**（2026-07-25）— 以前のチャットでの検討内容（中分緯度法での距離計算、簡易プロット版の地図表示、表示範囲N20-50/E115-150固定、JMA防災情報XML＋JTWCテキストのWi-Fi時取得＋オフラインキャッシュのハイブリッド方式）をCLAUDE.mdの現状要約に反映し、詳細な経緯・判断根拠は`docs/devlog-map-design.md`に退避。TASKS.mdも実際の設計に合わせて更新。
 
-**初回git commit/push完了**（2026-07-25、`main`ブランチ、root-commit `279b179`）— `commit.bat`経由でユーザーが実行。10ファイル・396行をリモート`https://github.com/captedge/tyohoon_npo.git`にpush。LF→CRLF変換の警告は無害（内容には影響なし）。
+**初回git commit/push完了**（2026-07-25、`main`ブランチ、root-commit `279b179`）— `git init`実行、`user.name`/`user.email`をグローバル設定（`Capt.Edge` / `captain.edge.management@gmail.com`）した上で、`commit.bat`経由でユーザーが実行。10ファイル・396行をリモート`https://github.com/captedge/tyohoon_npo.git`（`origin`として追加済み）にpush。LF→CRLF変換の警告は無害（内容には影響なし）。
 
 **地図モックアップレビュー・表示範囲の見直し**（2026-07-26）— 簡易プロット版モックアップを提示しフィードバックを反映。表示範囲をN20-50からN5-50/E115-150へ拡張（フィリピン全域を含めるため）、緯度経度両方のグリッド表示、ズームUI（＋／－ボタン＋スライダー追加）、UIラベル全て英語表記、再生ボタンのトグル動作を決定。経緯・教訓は`docs/devlog-map-design.md`に追記。
 
