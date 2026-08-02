@@ -96,6 +96,23 @@ git管理を開始する場合は以下の方針に従う（2026-07-25時点で�
 2. 変更前後の内容を比較したい場合は、gitではなくReadツール／`diff`コマンド（プレーンなファイル同士の比較）を使う。バージョン管理としての巻き戻しが必要な場合はユーザーに依頼する。
 3. 上記1つのステップでも「これくらいなら」という例外判断をしそうになったら、それ自体が宣言4（繰り返し検知）の兆候として一度立ち止まり、このホワイトリストを再確認する。
 
+### 個人用ビルド生成物（UserData含む）が公開リポジトリの履歴に残っていた問題（2026-08-02発覚・対策済み）
+
+**発生した問題**：`commit.bat`実行後のpush出力にGitHubの「File ... is over 50MB」警告が出たことをユーザーが報告、調査したところ`TyphoonShipTrackerPersonal/`（Windows個人用ビルド出力一式）・`TyphoonShipTrackerPersonal.apk`・`TyphoonShipTrackerPersonal.zip`が、main・feature/mobileの両ブランチで過去複数コミットにわたりgit管理下に入っていたことが判明。`TyphoonShipTrackerPersonal/UserData/app_state.v1.json`・`wave_field_cache.json`という**ユーザーの実際の保存データ（船名・Passage Plan＝航路計画のウェイポイント等）**も含まれていた。さらにリポジトリ本体を確認したところ**公開（Public）設定**だったため、これらは現時点で誰でも閲覧・取得可能な状態だった。
+
+**根本原因**：`.gitignore`には本流Windows版のビルド出力（`/TyphoonShipTracker/`）のみ除外設定されており、個人用ビルド（`build_release_personal.bat`／`build_apk_personal.bat`の出力）を導入した際に対応する除外設定を追加し忘れていた（下記「commit.batのpush先がmain固定」と同根の、新しい仕組み導入時の横断確認不足）。
+
+**対策**：
+1. `.gitignore`に`/TyphoonShipTrackerPersonal/`・`/TyphoonShipTrackerPersonal.apk`・`/TyphoonShipTrackerPersonal.zip`を追加（今後の再追跡を防止）。
+2. 既に公開済みの履歴（航路データ含む）を残さないよう、ユーザーの判断で**履歴を含めた完全削除**を選択。`pip install git-filter-repo`でツールを導入した上で、全コミット・全ブランチから該当パスを除去しforce pushする一回限りの`cleanup_git_history.bat`を用意・実行（Coworkサンドボックスにはpush権限が無く、また`add`/`commit`/`push`以外の書き込み系gitサブコマンドもサンドボックスからは実行しない方針のため、実行はユーザーのWindows機で行った）。
+3. 実行結果を確認：33コミットを書き換えmain/feature/mobile両ブランチをforce push、`.git`フォルダが97MBから19MBへ縮小、該当パスが`git ls-files`から消えていることを確認済み。
+
+**再発防止ルール（必須）**：
+1. 新しいビルド生成物（配布用zip・apk・exe一式）を生成するスクリプトを追加する際は、対応する`.gitignore`除外設定を同じタイミングで必ず追加する（「commit.batのpush先がmain固定」の教訓と合わせ、新しい仕組みを導入する際は関連ファイル全てを横断確認する習慣を徹底する）。
+2. ポータブル保存先（`UserData`フォルダ等）を含むビルド出力フォルダをgit管理対象にしないことを、実装時点で明示的に確認する（保存先設計とgit管理範囲は別々の関心事に見えるが、両方を同時に見落とすと個人データの公開という重大な結果になる）。
+3. `commit.bat`実行後の出力に警告（`warning:`）が出た場合、CRLF関連等の無害なものと、ファイルサイズ・push失敗等の実害があるものを区別し、後者は放置せずその場で調査する。
+4. **`git filter-repo`等の履歴書き換えスクリプトを実行する前に、未コミットの変更（ドキュメント編集含む）を必ず先にコミットしておく**（2026-08-02発生：この節を含む一連のドキュメント編集がコミット前の状態で`cleanup_git_history.bat`を実行してしまい、`git filter-repo`が作業ツリーをHEAD時点の内容にリセットしたため、未コミットだった編集が全て失われ、同じ内容を書き直す羽目になった。履歴書き換え系のgit操作は「作業ツリーが綺麗であること」を前提に案内する）。
+
 ### commit.batのpush先がmain固定でブランチ作業に対応していなかった問題（2026-08-02発覚・対策済み）
 
 **発生した問題**：`feature/mobile`ブランチで作業中、`commit.bat`をこのまま実行しようとしたところ、最終行が`git push -u origin main`固定になっていることが判明。これは「ローカルの`main`ブランチをorigin/mainへpush」という意味で、実際にチェックアウトしているブランチ（`feature/mobile`）とは無関係。確認したところローカル`main`とorigin/mainは既に一致（2026-07-31の`1d435f2`で停止、モバイル作業とは無関係）していたため、このまま実行すると①コミット自体は`feature/mobile`に正しく記録されるが、②pushは無関係なmainに対して行われ、③今回の変更はGitHubへ一切pushされない、という「エラーなく静かに失敗する」状態だった。`create_mobile_branch.bat`は`git push -u origin feature/mobile`と正しくブランチ名を指定していた一方、`commit.bat`側は`feature/mobile`ブランチ作成時に合わせて更新されていなかった。

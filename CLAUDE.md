@@ -40,7 +40,7 @@
 - **モバイル対応（Android先行）**（2026-08-02）：機能・デザインはデスクトップ版と共通、横向き固定、画面サイズ差分とタッチ操作のみ個別調整する方針。`android/`雛形生成済み、コア機能・モバイル専用UI一式（全画面地図・ダブルタップでのメニュー表示・凡例位置等）・長押しクロスヘアでの緯度経度表示（トラックパッド式相対移動、2本指ピンチと競合なし）を実装し、実機テストをユーザーが完了（「モバイルもほぼ完了です」）。残りは`productFlavors`（本流／個人の別アプリ化）等一部確認項目のみ（`TASKS.md`参照）。`feature/mobile`ブランチ運用。詳細は`docs/devlog-mobile-flutter.md`参照。
 - **オンライン化フェーズ①のスコープ**（2026-07-29確定）：JMA自動取得は手動ボタンのまま、取得結果の永続化キャッシュのみ実装。
 - **地方海上予報（VPCY51）は不採用・全削除済み**（2026-07-31）：ユーザーの仕様変更依頼を受けて撤去。削除済みファイル一覧・確認経緯は`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`参照。海上気象データはOpen-Meteo波の場（個人用）のみ残存。
-- **git運用**：`git init`済み、リモート`origin`（`https://github.com/captedge/tyohoon_npo.git`）追加済み（2026-07-25、詳細`docs/completed-log.md`）。commit/pushはユーザーが「コミットして」と発言した時のみ`commit.bat`経由（`docs/operation-rules.md`のgit運用ルールに従う）。
+- **git運用**：`git init`済み、リモート`origin`（`https://github.com/captedge/tyohoon_npo.git`、**公開リポジトリ**）追加済み（2026-07-25、詳細`docs/completed-log.md`）。commit/pushはユーザーが「コミットして」と発言した時のみ`commit.bat`経由（`docs/operation-rules.md`のgit運用ルールに従う）。**新しいビルド出力・保存先フォルダを追加する際は都度`.gitignore`除外を確認する**（2026-08-02、個人用ビルド生成物・UserDataが公開履歴に残っていた件で追加、`docs/operation-rules.md`参照）。**git履歴を書き換えるスクリプト（`cleanup_git_history.bat`等）を使う前は、未コミットの変更を必ず先にコミットする**（同日、この教訓自体を記録する編集が history rewrite で失われた実例あり）。
 
 ## セッション開始チェックリスト
 

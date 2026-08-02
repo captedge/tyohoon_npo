@@ -5,6 +5,10 @@
 書式：
 `**タイトル**（日付、コミットハッシュ、該当すればブランチ名）— 結論1〜2行。詳細は`docs/devlog-xxx.md`（devlogを作らない軽微な変更なら省略）。`
 
+**個人用ビルド生成物（UserData含む）が公開リポジトリの履歴に残っていた問題を修正、`cleanup_git_history.bat`実行でmain/feature/mobile両ブランチの全履歴から除去・force push完了**（2026-08-02）— `commit.bat`のpush出力にあったGitHub警告からユーザーが指摘、調査により`TyphoonShipTrackerPersonal/`（UserDataの実保存データ含む）・`.apk`・`.zip`がmain/feature/mobile両ブランチの履歴に残っており、かつリポジトリが公開設定であることを確認。ユーザーがPython経由で`git-filter-repo`をインストールし、`cleanup_git_history.bat`を実行（33コミットを書き換え、main/feature/mobileともforce push成功）。確認済み：実行後`.git`フォルダが97MBから19MBへ縮小、`git ls-files`で該当パスが追跡対象から消えていること、ロックファイル残留なし。**副作用**：このスクリプト実行時点で未コミットだった`.gitignore`修正・関連ドキュメント編集一式が、`git filter-repo`による作業ツリーのリセットで失われ、同内容を再編集する手戻りが発生（教訓は`docs/operation-rules.md`に追記済み）。詳細・再発防止ルールは`docs/operation-rules.md`「個人用ビルド生成物（UserData含む）が公開リポジトリの履歴に残っていた問題」参照。
+
+**リポジトリをPublicからPrivateへ変更、ユーザーの未ログインブラウザで404 Not Foundになることを確認**（2026-08-02）— 上記の履歴クリーンアップ後も「①個人情報・運行情報の漏洩」「③アプリのソースコードが簡単に複製される」懸念が残っていたため、ユーザーがGitHub設定からリポジトリをPrivateに変更。確認方法：Claude側の`web_fetch`（未ログイン相当）は一時的に古いPublic状態のキャッシュを返し続けたため誤って「まだPublicのまま」と報告してしまったが、ユーザー自身のシークレットウィンドウ（未ログイン）でのスクリーンショットで実際に404 Not Foundとなることを確認し、Private化が正しく反映されていると判断。メールアドレス（`docs/completed-log.md`内、2026-07-25の記録）は削除不要との判断（Private化により第三者から見えなくなるため）。
+
 **`commit.bat`のpush先がmain固定でfeature/mobileブランチのpushが無効化されていた不具合を修正**（2026-08-02）— `feature/mobile`ブランチでの作業中に発覚。`git push -u origin main`固定だったため、featureブランチでコミットしてもpushはローカルmain（origin/mainと既に一致・無関係）に対して行われ、実際の変更がGitHubへ反映されない状態だった。`git push -u origin HEAD`に変更し、常に現在のブランチをpushする設計に修正。詳細・再発防止ルールは`docs/operation-rules.md`「commit.batのpush先がmain固定でブランチ作業に対応していなかった問題」参照。
 
 **アプリアイコン（`app_icon_05.png`）をAndroid実機/エミュレータのホーム画面で確認、視認性は問題なしと確定**（2026-08-02）— ユーザー確認：「なかなか良い感じでした」。AskUserQuestionで確認範囲を具体化した結果、確認済みはAndroid（エミュレータ/実機、ホーム画面表示）のみで、Windows（タスクバー／エクスプローラー）は未確認のまま残る（TASKS.md参照）。あわせて「正方形の枠に対する船・台風の絵柄の大きさ（スケール）を調整したい」との新たな要望をユーザーから確認（視認性自体とは別の要望、次回着手・TASKS.md参照）。詳細は`docs/devlog-app-icon-design.md`参照。
