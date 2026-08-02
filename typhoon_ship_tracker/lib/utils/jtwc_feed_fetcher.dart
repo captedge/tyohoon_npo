@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:xml/xml.dart';
 
+import 'jtwc_parser.dart' show parseJtwcWarningText;
+
 /// Thrown for network/HTTP-layer failures while fetching the JTWC RSS feed
 /// or an individual TC Warning Text product — distinct from any parse
 /// failure of the *pasted-text-shaped* result this returns, which is
@@ -96,17 +98,29 @@ Future<String> _fetchText(String url) async {
 
 /// Finds every "TC Warning Text" product URL inside the NWPAC-NIO-WARNINGS
 /// <item>'s HTML-in-CDATA <description>, in the order they appear there —
-/// each one a plain-text warning bulletin, in exactly the format
-/// jtwc_parser.dart's parseJtwcWarningText already parses from a manual
-/// paste. When more than one storm is active in the region at once, their
-/// entries are simply concatenated one after another inside the same
-/// <description> (confirmed 2026-07-29 by observing this shape for the
-/// feed's Central/Eastern Pacific item, which had two storms back to
-/// back), so each storm contributes exactly one "web.txt" link here — no
-/// separate de-duplication step is needed the way jma_feed_fetcher.dart's
+/// each one a plain-text bulletin, in exactly the format jtwc_parser.dart's
+/// parseJtwcWarningText already parses from a manual paste. When more than
+/// one product is active in the region at once, their entries are simply
+/// concatenated one after another inside the same <description> (confirmed
+/// 2026-07-29 by observing this shape for the feed's Central/Eastern
+/// Pacific item, which had two storms back to back), so each product
+/// contributes exactly one "web.txt" link here — no separate
+/// de-duplication step is needed the way jma_feed_fetcher.dart's
 /// extra.xml-based equivalent needs one (that feed lists individual
 /// bulletins over time, not one entry per distinct storm; this RSS feed's
-/// <description> already only ever lists *currently active* storms).
+/// <description> already only ever lists *currently active* products).
+///
+/// Not every "web.txt" link found here is a numbered/named storm's warning
+/// text — a "TROPICAL CYCLONE FORMATION ALERT" (TCFA, issued for a
+/// pre-formation INVEST area with no number/name yet, e.g. "INVEST 94W")
+/// shares the exact same product naming/link shape (2026-08-03 report: one
+/// showed up here and got auto-filled into a Typhoon slot, which then
+/// blocked Save with "couldn't find a designation" until the user manually
+/// cleared the text). This function itself stays a dumb "every web.txt
+/// link, in order" list — the designation-based filtering that excludes
+/// TCFAs belongs in this file's callers (below), which already know how to
+/// parse a candidate's text and can make that call per-candidate rather
+/// than by guessing from the URL alone.
 ///
 /// Returns an empty list if the category currently has no active storm at
 /// all (its <description> is then just a "No Current Tropical Cyclone
@@ -162,14 +176,44 @@ String? _firstChildText(XmlElement parent, String localName) {
 /// the existing persistence (AppStateStorage's pastedText field) already
 /// covers a fetch result with no changes needed there.
 ///
-/// Returns null (not an error) when the region currently has no active
-/// storm — see [_findWarningTextUrls]'s doc comment. Throws
-/// [JtwcFetchException] for network/HTTP failures.
-Future<String?> fetchLatestJtwcWarningText() async {
+/// Returns null (not an error) when the region currently has no active,
+/// *numbered/named* storm — this includes both "nothing at all in the
+/// feed" and "the feed only has a Tropical Cyclone Formation Alert for an
+/// as-yet-unnumbered INVEST" (see [_hasDesignation]'s doc comment: a TCFA
+/// is skipped the same as no product at all, rather than being returned as
+/// if it were a usable warning). Throws [JtwcFetchException] for network/
+/// HTTP failures fetching the *list* feed itself; a failure fetching one
+/// individual candidate is skipped in favour of trying the next one (same
+/// "one bad candidate shouldn't hide the others" choice
+/// [fetchActiveJtwcWarningTexts] makes), capped at [maxCandidates] fetches.
+Future<String?> fetchLatestJtwcWarningText({int maxCandidates = 10}) async {
   final urls = await _findWarningTextUrls();
-  if (urls.isEmpty) return null;
-  return _fetchText(urls.first);
+  for (final url in urls.take(maxCandidates)) {
+    String text;
+    try {
+      text = await _fetchText(url);
+    } catch (_) {
+      continue;
+    }
+    if (_hasDesignation(text)) return text;
+  }
+  return null;
 }
+
+/// Whether [text] parses as a numbered/named tropical cyclone warning
+/// (jtwc_parser.dart's designation pattern — "TYPHOON/TROPICAL STORM/...
+/// <number> (<name>)") rather than some other NWPAC-NIO-WARNINGS product
+/// that happens to also end in "web.txt", most notably a "TROPICAL CYCLONE
+/// FORMATION ALERT" (TCFA) issued for a pre-formation INVEST area, which
+/// has no number/name to give (e.g. "INVEST 94W" — 94 is an invest slot
+/// number, not a storm number, and never appears in the "<number>(<name>)"
+/// shape this app tracks). Used by both fetch functions in this file to
+/// skip such candidates the same way "no active storm" is already handled,
+/// rather than letting one through to auto-fill a Typhoon slot with text
+/// that Save-time validation (map_screen.dart) would then reject anyway —
+/// 2026-08-03 report: that used to require the user to notice the red
+/// error and manually clear the text box before Save would work again.
+bool _hasDesignation(String text) => parseJtwcWarningText(text).designation != null;
 
 /// Fetches up to [maxResults] currently-active storms' "TC Warning Text"
 /// bulletins from the NWPAC-NIO-WARNINGS region (2026-07-29 addition, for
@@ -186,23 +230,36 @@ Future<String?> fetchLatestJtwcWarningText() async {
 /// one entry per storm, not a rolling history of past bulletins).
 ///
 /// Returns an empty list (not an error) if the region currently has no
-/// active storm. Throws [JtwcFetchException] for network/HTTP failures
-/// fetching the *list* feed itself; a failure fetching one individual
-/// candidate bulletin is skipped rather than aborting the whole call, so
-/// one bad bulletin doesn't hide the others (mirrors
-/// fetchActiveJmaTyphoons's same choice).
+/// active, numbered/named storm — a Tropical Cyclone Formation Alert (TCFA,
+/// for a not-yet-numbered INVEST) is skipped rather than counted as a
+/// result, same as [fetchLatestJtwcWarningText] (see [_hasDesignation]'s
+/// doc comment — 2026-08-03 report: one used to get auto-filled into a
+/// Typhoon slot and block Save until manually cleared). Throws
+/// [JtwcFetchException] for network/HTTP failures fetching the *list* feed
+/// itself; a failure fetching one individual candidate bulletin is skipped
+/// rather than aborting the whole call, so one bad bulletin doesn't hide
+/// the others (mirrors fetchActiveJmaTyphoons's same choice).
 Future<List<String>> fetchActiveJtwcWarningTexts({int maxResults = 3, int maxCandidates = 10}) async {
   final urls = await _findWarningTextUrls();
   final results = <String>[];
   for (final url in urls.take(maxCandidates)) {
     if (results.length >= maxResults) break;
+    String text;
     try {
-      results.add(await _fetchText(url));
+      text = await _fetchText(url);
     } catch (_) {
       // Skip a single bad candidate (network hiccup for just this one
       // bulletin) rather than aborting the whole batch — see doc comment.
       continue;
     }
+    if (!_hasDesignation(text)) {
+      // Not a numbered/named storm's warning text (e.g. a TCFA) — see
+      // _hasDesignation's doc comment. Skip it like any other
+      // not-currently-a-trackable-storm candidate, rather than adding it
+      // to results.
+      continue;
+    }
+    results.add(text);
   }
   return results;
 }

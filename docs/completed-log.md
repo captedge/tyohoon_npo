@@ -5,6 +5,12 @@
 書式：
 `**タイトル**（日付、コミットハッシュ、該当すればブランチ名）— 結論1〜2行。詳細は`docs/devlog-xxx.md`（devlogを作らない軽微な変更なら省略）。`
 
+**`check_status.bat`を新規追加、commit.bat実行前にWindows実機側の実際のgit statusを確認できるように**（2026-08-03）— commit.bat案内前にサンドボックスの`git status`を確認したところ約48ファイルが「modified」と誤表示され（`git diff -w`で実際の内容差分は意図した2ファイルのみと判明）、ユーザーにWindows実機で確認してもらって初めて実態と一致することを確認できた。以後はこの`check_status.bat`（プロジェクトルート、ダブルクリックで`git status`を実行してpause）をcommit.bat実行前の定型確認手段とする。詳細・教訓は`docs/operation-rules.md`「サンドボックス経由のgit statusが実際のWindows側と食い違った実例」参照。
+
+**JTWC自動取得がTropical Cyclone Formation Alert（TCFA、番号・名称未確定のINVEST）を拾いSaveがブロックされる不具合を修正、Windows実機確認完了**（2026-08-03）— ユーザー報告：Import from JTWC／Import Allで取得した文中に「TROPICAL CYCLONE FORMATION ALERT (INVEST 94W)」が含まれる場合、番号(名称)パターンが無いためSave時に全スロットがエラーでブロックされ、テキスト削除でしか回避できなかった。`lib/utils/jtwc_feed_fetcher.dart`の`fetchLatestJtwcWarningText`／`fetchActiveJtwcWarningTexts`に、取得候補が`jtwc_parser.dart`のdesignation（番号＋名称）を持たない場合はスキップする処理を追加し、TCFAは「現在アクティブな台風なし」と同様に無視されるよう修正（手動貼り付け時の既存バリデーションは変更なし）。ユーザーがWindows実機で確認しOK。
+
+**JMA/JTWC/Open-Meteoの自動取得が同時にHandshakeException（Hostname mismatch）で失敗した件、コード側の問題ではなくStarlink回線の不安定さが原因と判明**（2026-08-03）— 3つの別ドメインへの自動取得が同一エラーで同時に失敗したため、企業プロキシ／ウイルス対策ソフトのHTTPS検査等の環境要因を疑いユーザーに切り分け確認したところ、「ネットワーク（Starlink）が弱かったみたい」との回答で解消・再取得成功。コード変更は行っていない。同じ症状が再発した場合はまずネットワーク状態（Starlink回線品質）を疑う。
+
 **個人用ビルド生成物（UserData含む）が公開リポジトリの履歴に残っていた問題を修正、`cleanup_git_history.bat`実行でmain/feature/mobile両ブランチの全履歴から除去・force push完了**（2026-08-02）— `commit.bat`のpush出力にあったGitHub警告からユーザーが指摘、調査により`TyphoonShipTrackerPersonal/`（UserDataの実保存データ含む）・`.apk`・`.zip`がmain/feature/mobile両ブランチの履歴に残っており、かつリポジトリが公開設定であることを確認。ユーザーがPython経由で`git-filter-repo`をインストールし、`cleanup_git_history.bat`を実行（33コミットを書き換え、main/feature/mobileともforce push成功）。確認済み：実行後`.git`フォルダが97MBから19MBへ縮小、`git ls-files`で該当パスが追跡対象から消えていること、ロックファイル残留なし。**副作用**：このスクリプト実行時点で未コミットだった`.gitignore`修正・関連ドキュメント編集一式が、`git filter-repo`による作業ツリーのリセットで失われ、同内容を再編集する手戻りが発生（教訓は`docs/operation-rules.md`に追記済み）。詳細・再発防止ルールは`docs/operation-rules.md`「個人用ビルド生成物（UserData含む）が公開リポジトリの履歴に残っていた問題」参照。
 
 **リポジトリをPublicからPrivateへ変更、ユーザーの未ログインブラウザで404 Not Foundになることを確認**（2026-08-02）— 上記の履歴クリーンアップ後も「①個人情報・運行情報の漏洩」「③アプリのソースコードが簡単に複製される」懸念が残っていたため、ユーザーがGitHub設定からリポジトリをPrivateに変更。確認方法：Claude側の`web_fetch`（未ログイン相当）は一時的に古いPublic状態のキャッシュを返し続けたため誤って「まだPublicのまま」と報告してしまったが、ユーザー自身のシークレットウィンドウ（未ログイン）でのスクリーンショットで実際に404 Not Foundとなることを確認し、Private化が正しく反映されていると判断。メールアドレス（`docs/completed-log.md`内、2026-07-25の記録）は削除不要との判断（Private化により第三者から見えなくなるため）。
