@@ -4,6 +4,7 @@ import 'dart:math' as math;
 import 'dart:ui' as ui;
 
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 
@@ -144,6 +145,40 @@ class _MapScreenState extends State<MapScreen> {
   double _offsetHours = 24;
   bool _isPlaying = false;
   Timer? _playTimer;
+
+  // --- Mobile-only chrome overlay (2026-08-02 request, revised 2026-08-02
+  // after the first version's edge-swipe trigger conflicted with map
+  // panning even with a large hit zone) ---
+  //
+  // On Android/iOS the AppBar and playback bar are hidden by default so the
+  // map fills the whole screen; they slide in as overlays (not affecting
+  // map layout at all — see build()) on a quick double-tap anywhere on the
+  // map and auto-hide again after _mobileChromeAutoHideDelay of no
+  // interaction with them. Desktop (Windows) is completely unaffected —
+  // _isMobileUi is false there, so the AppBar/playback bar stay exactly as
+  // before (always-on Scaffold.appBar and Column sibling), and the map's
+  // GestureDetector gets no onDoubleTap at all (see build()) so there's no
+  // double-tap disambiguation delay added to desktop's existing tap-to-
+  // toggle-rings interaction either.
+  bool get _isMobileUi => !kIsWeb && (Platform.isAndroid || Platform.isIOS);
+  static const Duration _mobileChromeAutoHideDelay = Duration(seconds: 2);
+  static const Duration _mobileChromeAnimDuration = Duration(milliseconds: 200);
+
+  bool _mobileChromeVisible = false;
+  Timer? _mobileChromeHideTimer;
+
+  // Called on a double-tap anywhere on the map (see the GestureDetector in
+  // build() wrapping the map's CustomPaint) and also whenever the user
+  // touches inside the revealed bars themselves (see the Listener wrapping
+  // each AnimatedPositioned in build()) — either way this (re)starts the
+  // 2-second countdown from scratch.
+  void _showMobileChrome() {
+    _mobileChromeHideTimer?.cancel();
+    if (!_mobileChromeVisible) setState(() => _mobileChromeVisible = true);
+    _mobileChromeHideTimer = Timer(_mobileChromeAutoHideDelay, () {
+      if (mounted) setState(() => _mobileChromeVisible = false);
+    });
+  }
 
   // --- Wave field overlay state (2026-07-29, personal build only) ---
   //
@@ -413,9 +448,31 @@ class _MapScreenState extends State<MapScreen> {
   List<TyphoonMarker> get _typhoonMarkers => [for (final group in _typhoonMarkerGroups) ...group];
 
   // Lat/lon under the mouse cursor, shown bottom-right (2026-07-27 request).
-  // Null when the cursor isn't over the map (or on touch-only devices,
-  // where hover events never fire — the readout just stays hidden there).
+  // Null when the cursor isn't over the map. On touch-only devices, mouse
+  // hover events never fire, so this stays null until mobile cursor mode
+  // (below) sets it explicitly — same readout widget, two different input
+  // sources feeding it.
   ({double lat, double lon})? _cursorLatLon;
+
+  // Mobile "cursor mode" (2026-08-02 request): a long press anywhere on the
+  // map drops a red crosshair at that point and starts showing its lat/lon
+  // in the same bottom-right readout the mouse cursor uses on desktop
+  // (_cursorLatLon above). Dragging while still holding moves the
+  // crosshair; releasing keeps it in place; a short tap afterwards dismisses
+  // it and returns to normal pan/zoom. While active, InteractiveViewer's own
+  // pan/pinch are disabled (see the child: InteractiveViewer(...) call site)
+  // — the user's own proposed fix for what would otherwise be a genuine
+  // gesture conflict between "drag to move the crosshair" and "drag to pan
+  // the map", the same class of problem the edge-swipe attempt ran into
+  // (see "スワイプ方式の撤回" in docs/devlog-mobile-flutter.md) — but here
+  // solved at the source (disabling the competing gesture) rather than by
+  // trying to make two continuous drags distinguishable, which doesn't work.
+  bool _mobileCursorModeActive = false;
+  // Viewport-space (not scene/canvas-space) position of the crosshair, so it
+  // can be drawn as a plain Positioned overlay outside InteractiveViewer's
+  // transform — same coordinate space _handleHover/_latLonAtViewportPoint
+  // already use, so no extra zoom-correction math is needed here.
+  Offset? _mobileCursorViewportPos;
 
   DateTime get _currentTime => _startTime.add(Duration(minutes: (_offsetHours * 60).round()));
 
@@ -475,6 +532,7 @@ class _MapScreenState extends State<MapScreen> {
   void dispose() {
     _playTimer?.cancel();
     _waveAnimTimer?.cancel();
+    _mobileChromeHideTimer?.cancel();
     _transformationController.removeListener(_syncFromController);
     _transformationController.dispose();
     super.dispose();
@@ -710,6 +768,111 @@ class _MapScreenState extends State<MapScreen> {
     setState(() => _cursorLatLon = _latLonAtViewportPoint(event.localPosition));
   }
 
+  // Mobile cursor mode entry (see the field doc comments above). Wired
+  // mobile-only (_isMobileUi ? handler : null) at the call site, same
+  // convention as onDoubleTap elsewhere in this file. Long-press specifically
+  // (rather than a raw Listener) is kept for *entry* because the hold-still
+  // duration/slop logic that distinguishes "deliberate long press" from
+  // "starting a normal drag" is exactly what LongPressGestureRecognizer
+  // already implements — no need to reinvent it.
+  void _handleMobileCursorLongPressStart(LongPressStartDetails details) {
+    setState(() {
+      _mobileCursorModeActive = true;
+      _mobileCursorViewportPos = details.localPosition;
+      _cursorLatLon = _latLonAtViewportPoint(details.localPosition);
+    });
+  }
+
+  // Tracks which pointers (fingers) are currently down, purely so the
+  // crosshair-drag handlers below can tell a single-finger drag apart from
+  // a two-finger pinch (2026-08-02 second follow-up: "指一本でUIのどこで
+  // パンしてもカーソルが動くようにしてほしい。指二本はズームのみ。現状指
+  // 二本ではズームは一切できず、カーソルが反応する").
+  //
+  // The previous version used onPanStart/onPanUpdate on the same
+  // GestureDetector as the long-press handlers — a PanGestureRecognizer,
+  // which claims the gesture arena for the first finger down and never lets
+  // go, even once a second finger joins. That's exactly why pinch stopped
+  // working entirely once cursor mode was active: InteractiveViewer's own
+  // scale recognizer never got a chance to see the first finger, so it had
+  // no second point to combine with when the pinch finger arrived. This is
+  // the same class of problem as the abandoned edge-swipe design (see
+  // "スワイプ方式の撤回" above) — solved the same way, by switching to a
+  // Listener. A Listener only *observes* raw pointer events; it never
+  // enters the gesture arena, so InteractiveViewer's scale recognizer keeps
+  // seeing every pointer exactly as if this Listener weren't here at all,
+  // and pinch-to-zoom (scaleEnabled: true, unaffected by cursor mode) works
+  // normally even while the crosshair is also tracking single-finger drags.
+  final Set<int> _mobileCursorActivePointers = {};
+
+  // The finger's own last-seen position (not the crosshair's) — used to
+  // compute a per-frame *delta* rather than moving the crosshair to the
+  // finger's absolute position (2026-08-02 third follow-up: "指を離しまた
+  // 触れるとその位置に来てしまう...実際の指の位置とカーソルを離して移動
+  // したい" — touching down should never relocate the crosshair, and
+  // dragging should move it by however far the finger moved, not snap it
+  // under the finger, so the finger doesn't have to sit on top of (and
+  // hide) the crosshair it's controlling — this is the same relative/
+  // trackpad-style control scheme a laptop touchpad uses, as opposed to a
+  // touchscreen's usual "finger position = pointer position" convention).
+  // Null whenever no single finger is currently being tracked (reset on
+  // every pointer up/cancel, so a stale reference from a lifted finger is
+  // never reused for a different one).
+  Offset? _mobileCursorLastPointerPos;
+
+  void _handleMobileCursorPointerDown(PointerDownEvent event) {
+    _mobileCursorActivePointers.add(event.pointer);
+    if (_mobileCursorActivePointers.length == 1) {
+      // Deliberately does NOT touch _mobileCursorViewportPos/_cursorLatLon
+      // here — just starts tracking this finger's position so the first
+      // onPointerMove below has a baseline to compute a delta from. See
+      // the field doc comment above for why touching down must never move
+      // the crosshair itself.
+      _mobileCursorLastPointerPos = event.localPosition;
+    }
+  }
+
+  void _handleMobileCursorPointerMove(PointerMoveEvent event) {
+    if (!_mobileCursorModeActive) return;
+    // Only a lone finger moves the crosshair. Once a second one joins
+    // (length > 1), this is a pinch instead — left entirely alone here so
+    // InteractiveViewer's own recognizer handles it.
+    if (_mobileCursorActivePointers.length != 1) return;
+    final lastPointerPos = _mobileCursorLastPointerPos;
+    _mobileCursorLastPointerPos = event.localPosition;
+    final currentCursorPos = _mobileCursorViewportPos;
+    if (lastPointerPos == null || currentCursorPos == null) return;
+    final delta = event.localPosition - lastPointerPos;
+    final newCursorPos = currentCursorPos + delta;
+    setState(() {
+      _mobileCursorViewportPos = newCursorPos;
+      _cursorLatLon = _latLonAtViewportPoint(newCursorPos);
+    });
+  }
+
+  void _handleMobileCursorPointerUpOrCancel(PointerEvent event) {
+    _mobileCursorActivePointers.remove(event.pointer);
+    // Always reset, not just when the last finger lifts — e.g. after a
+    // pinch (2 fingers) drops back to 1, the remaining finger's next move
+    // should start a fresh delta baseline rather than reuse whichever
+    // finger's position happened to be recorded last, which could belong
+    // to the finger that just lifted.
+    _mobileCursorLastPointerPos = null;
+  }
+
+  // Called from the map's tap handler when a short tap lands while cursor
+  // mode is active — dismisses the crosshair and hands control back to the
+  // normal pan/zoom/tap-to-toggle-rings behavior. Not wired to onTap
+  // directly (see the call site comment) to avoid adding a second
+  // independent tap recognizer alongside the existing one.
+  void _exitMobileCursorMode() {
+    setState(() {
+      _mobileCursorModeActive = false;
+      _mobileCursorViewportPos = null;
+      _cursorLatLon = null;
+    });
+  }
+
   // Keeps (_zoom, _translation) in sync with the transformation controller's
   // actual current value — called from the persistent listener registered
   // in initState (fires for every change: drag/pinch, InteractiveViewer's
@@ -725,6 +888,16 @@ class _MapScreenState extends State<MapScreen> {
     setState(() {
       _zoom = m.getMaxScaleOnAxis();
       _translation = Offset(t.x, t.y);
+      // Mobile cursor mode + pinch-zoom left enabled together (2026-08-02
+      // follow-up): the crosshair stays put at the same viewport pixel
+      // while zooming, but the map moves/scales underneath it, so the
+      // lat/lon it points at changes too — recompute here on every
+      // transform change (same "fires every frame during a live pinch"
+      // listener this method already relies on for _zoom/_translation) so
+      // the readout never goes stale mid-pinch.
+      if (_isMobileUi && _mobileCursorModeActive && _mobileCursorViewportPos != null) {
+        _cursorLatLon = _latLonAtViewportPoint(_mobileCursorViewportPos!);
+      }
     });
   }
 
@@ -2321,10 +2494,22 @@ class _MapScreenState extends State<MapScreen> {
             final atLimit = _voyagePlans.length >= _maxVoyagePlans;
             return AlertDialog(
               title: const Text('Passage Plan'),
+              // Scrollable as a whole (2026-08-02 request: on a mobile
+              // screen — especially landscape, where vertical space is
+              // tight — the previous fixed height: 420 could exceed the
+              // available screen height with no way to reach the bottom of
+              // the dialog). maxHeight caps at 80% of the current screen so
+              // there's always a visible margin around the dialog; below
+              // that height nothing changes visually from before. The
+              // per-plan list below is now laid out inline (not its own
+              // nested ListView) so the whole dialog scrolls together as
+              // one, rather than having two independently-scrolling areas.
               content: SizedBox(
                 width: 460,
-                height: 420,
-                child: Column(
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(dialogContext).size.height * 0.8),
+                  child: SingleChildScrollView(
+                    child: Column(
                   crossAxisAlignment: CrossAxisAlignment.stretch,
                   children: [
                     const Text("Ship's Name", style: TextStyle(fontWeight: FontWeight.bold)),
@@ -2379,63 +2564,75 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                     const SizedBox(height: 8),
                     const Divider(height: 1),
-                    Expanded(
-                      child: _voyagePlans.isEmpty
-                          ? Center(
-                              child: Text(
-                                'No passage plans imported yet.',
-                                style: TextStyle(color: Colors.grey.shade600),
-                              ),
-                            )
-                          : ListView.separated(
-                              itemCount: _voyagePlans.length,
-                              separatorBuilder: (_, __) => const Divider(height: 1),
-                              itemBuilder: (context, index) {
-                                final entry = _voyagePlans[index];
-                                return Padding(
-                                  padding: const EdgeInsets.symmetric(vertical: 2),
-                                  child: Row(
-                                    children: [
-                                      Checkbox(
-                                        value: entry.displayEnabled,
-                                        onChanged: (v) => setDialogState(() {
-                                          setState(() => entry.displayEnabled = v ?? true);
-                                          _saveState();
-                                        }),
-                                      ),
-                                      Expanded(
-                                        child: Text(
-                                          entry.name.isEmpty ? 'Plan ${index + 1}' : entry.name,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                      ),
-                                      // Position/limit readout (2026-07-27
-                                      // request: move the "(n/10)" count off
-                                      // the Import CSV button and onto each
-                                      // row instead, same as Edit CSV's
-                                      // per-row "n/50").
-                                      Text(
-                                        '${index + 1}/$_maxVoyagePlans',
-                                        style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
-                                      ),
-                                      const SizedBox(width: 4),
-                                      IconButton(
-                                        tooltip: 'Edit',
-                                        icon: const Icon(Icons.edit, size: 20),
-                                        onPressed: () => runAndRefresh(() => _editVoyagePlanEntry(index)),
-                                      ),
-                                      IconButton(
-                                        tooltip: 'Delete',
-                                        icon: const Icon(Icons.delete_outline, size: 20),
-                                        onPressed: () => runAndRefresh(() => _deleteVoyagePlanEntry(index)),
-                                      ),
-                                    ],
+                    const SizedBox(height: 4),
+                    // Inline list (2026-08-02, replacing a nested
+                    // ListView.separated) so this whole dialog scrolls as
+                    // one via the SingleChildScrollView above, instead of
+                    // having its own independently-scrolling area — a
+                    // ListView needs a bounded height (what the removed
+                    // Expanded provided), which isn't available once the
+                    // outer Column itself is inside a scroll view. Fine
+                    // performance-wise: capped at _maxVoyagePlans (10) rows.
+                    if (_voyagePlans.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 12),
+                        child: Center(
+                          child: Text(
+                            'No passage plans imported yet.',
+                            style: TextStyle(color: Colors.grey.shade600),
+                          ),
+                        ),
+                      )
+                    else
+                      for (var index = 0; index < _voyagePlans.length; index++) ...[
+                        if (index > 0) const Divider(height: 1),
+                        Builder(builder: (context) {
+                          final entry = _voyagePlans[index];
+                          return Padding(
+                            padding: const EdgeInsets.symmetric(vertical: 2),
+                            child: Row(
+                              children: [
+                                Checkbox(
+                                  value: entry.displayEnabled,
+                                  onChanged: (v) => setDialogState(() {
+                                    setState(() => entry.displayEnabled = v ?? true);
+                                    _saveState();
+                                  }),
+                                ),
+                                Expanded(
+                                  child: Text(
+                                    entry.name.isEmpty ? 'Plan ${index + 1}' : entry.name,
+                                    overflow: TextOverflow.ellipsis,
                                   ),
-                                );
-                              },
+                                ),
+                                // Position/limit readout (2026-07-27
+                                // request: move the "(n/10)" count off
+                                // the Import CSV button and onto each
+                                // row instead, same as Edit CSV's
+                                // per-row "n/50").
+                                Text(
+                                  '${index + 1}/$_maxVoyagePlans',
+                                  style: TextStyle(fontSize: 11, color: Colors.grey.shade600),
+                                ),
+                                const SizedBox(width: 4),
+                                IconButton(
+                                  tooltip: 'Edit',
+                                  icon: const Icon(Icons.edit, size: 20),
+                                  onPressed: () => runAndRefresh(() => _editVoyagePlanEntry(index)),
+                                ),
+                                IconButton(
+                                  tooltip: 'Delete',
+                                  icon: const Icon(Icons.delete_outline, size: 20),
+                                  onPressed: () => runAndRefresh(() => _deleteVoyagePlanEntry(index)),
+                                ),
+                              ],
                             ),
-                    ),
+                          );
+                        }),
+                      ],
                   ],
+                    ),
+                  ),
                 ),
               ),
               actions: [
@@ -2597,64 +2794,92 @@ class _MapScreenState extends State<MapScreen> {
   // Null (nothing to show) when there are no Display-on plans, same as the
   // rest of this screen's "don't show empty chrome" pattern.
   Widget? _buildPassagePlanLegend(List<({List<TrackPoint> track, String label, Color? colorOverride})> tracks) {
-    if (tracks.isEmpty) return null;
+    // Mobile (2026-08-02, revised same day after user correction — the
+    // "move to bottom corners" request was a miscommunication; the actual
+    // request is top-left/top-right, unchanged in *position* from desktop,
+    // just shrunk in *size* — see docs/devlog-mobile-flutter.md): stays at
+    // top-left, same as desktop. The scale factor below only shrinks the
+    // card's own content (via _passagePlanLegendCard) — critically, NOT
+    // the left/top anchor offsets themselves. An earlier version scaled
+    // left/top by 0.5 too (left: 48 * scale, top: 40 * scale), which halved
+    // the real clearance from the grid labels the offsets exist to avoid —
+    // the labels themselves aren't scaled, so a scaled-down offset gave
+    // less actual protection, which was the real cause of the original
+    // overlap report (not "the screen is smaller", as first assumed).
+    final scale = _isMobileUi ? 0.5 : 1.0;
+    final card = _passagePlanLegendCard(tracks, scale: scale);
+    if (card == null) return null;
     return Positioned(
-      // 2026-07-29 adjustment: nudged right/down from the initial (12, 12)
-      // — at (12, 12) this box could overlap the lon/lat grid-line labels
+      // Nudged right/down from the initial (12, 12) — 2026-07-29 — at (12,
+      // 12) this box could overlap the lon/lat grid-line labels
       // (_buildGridLabelOverlay), which sit right at the top edge (top:
       // margin=4) and can appear anywhere along the left edge too (lat
       // labels are pinned to left:margin=4 at whatever screen Y their grid
       // line falls at, so a label can land anywhere vertically, not just
       // near the top). 40/48 clears both: below the top-edge lon label row,
-      // and past the widest lat label chip's width.
+      // and past the widest lat label chip's width. Same on mobile as
+      // desktop (see the scale-factor comment above for why these two
+      // numbers specifically are never multiplied by scale).
       left: 48,
       top: 40,
-      child: IgnorePointer(
-        child: Container(
-          constraints: const BoxConstraints(maxWidth: 240),
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          decoration: BoxDecoration(
-            color: Colors.white,
-            border: Border.all(color: const Color(0xFF0D2436), width: 2),
-            borderRadius: BorderRadius.circular(4),
+      child: IgnorePointer(child: card),
+    );
+  }
+
+  // The Passage Plan legend's actual content (border/padding/rows), without
+  // any positioning — split out from _buildPassagePlanLegend purely to keep
+  // the positioning logic and the content-building logic easy to read
+  // separately. [scale] mirrors the same 0.5-on-mobile/1.0-on-desktop
+  // convention as the other two legend builders (_buildTyphoonLegend,
+  // _buildWaveHeightLegend).
+  Widget? _passagePlanLegendCard(
+    List<({List<TrackPoint> track, String label, Color? colorOverride})> tracks, {
+    required double scale,
+  }) {
+    if (tracks.isEmpty) return null;
+    return Container(
+      constraints: BoxConstraints(maxWidth: 240 * scale),
+      padding: EdgeInsets.symmetric(horizontal: 14 * scale, vertical: 10 * scale),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        border: Border.all(color: const Color(0xFF0D2436), width: 2),
+        borderRadius: BorderRadius.circular(4),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          Text(
+            'Passage Plan',
+            textAlign: TextAlign.center,
+            style: TextStyle(fontSize: 15 * scale, fontWeight: FontWeight.w600),
           ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              const Text(
-                'Passage Plan',
-                textAlign: TextAlign.center,
-                style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
-              ),
-              const SizedBox(height: 8),
-              for (var i = 0; i < tracks.length; i++) ...[
-                if (i > 0) const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Expanded(
-                      child: Text(
-                        tracks[i].label,
-                        overflow: TextOverflow.ellipsis,
-                        style: TextStyle(
-                          fontSize: 13,
-                          fontWeight: FontWeight.w600,
-                          color: tracks[i].colorOverride ?? _shipColors[i % _shipColors.length],
-                        ),
-                      ),
-                    ),
-                    const SizedBox(width: 10),
-                    Container(
-                      width: 36,
-                      height: 3,
+          SizedBox(height: 8 * scale),
+          for (var i = 0; i < tracks.length; i++) ...[
+            if (i > 0) SizedBox(height: 6 * scale),
+            Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    tracks[i].label,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13 * scale,
+                      fontWeight: FontWeight.w600,
                       color: tracks[i].colorOverride ?? _shipColors[i % _shipColors.length],
                     ),
-                  ],
+                  ),
+                ),
+                SizedBox(width: 10 * scale),
+                Container(
+                  width: 36 * scale,
+                  height: 3 * scale,
+                  color: tracks[i].colorOverride ?? _shipColors[i % _shipColors.length],
                 ),
               ],
-            ],
-          ),
-        ),
+            ),
+          ],
+        ],
       ),
     );
   }
@@ -2707,14 +2932,29 @@ class _MapScreenState extends State<MapScreen> {
       }
     }
     if (rows.isEmpty) return null;
+    // Mobile (2026-08-02 request, revised same day after user correction —
+    // stays top-right like desktop, not moved to a bottom corner; see the
+    // matching comment in _buildPassagePlanLegend for the full story):
+    // shrunk to 50%, including the text — but critically, only the card's
+    // own content is scaled, never the left/top/right anchor offsets below
+    // (that was the actual bug behind the original grid-label overlap
+    // report, not the position itself).
+    final scale = _isMobileUi ? 0.5 : 1.0;
     // Top offset (40) matches the Positioned below; bottom margin (12)
-    // matches the zoom column's own top/bottom margin, so the box always
-    // keeps at least that much clearance above whatever sits below this
-    // Stack — the playback bar when hasTimeline, or just the window edge
-    // otherwise. Clamped to >=0 since a very short window could otherwise
-    // make this negative.
+    // matches the zoom column's own top/bottom margin on desktop (mobile
+    // has no zoom column — removed entirely, see build() — but keeps the
+    // same 12 for simplicity, since this is just a safety cap that rarely
+    // binds in practice). Clamped to >=0 since a very short window could
+    // otherwise make this negative.
     final maxBoxHeight = math.max(0.0, availableHeight - 40 - 12);
     return Positioned(
+      // Top-right, clear of the zoom column on desktop (see the long
+      // comment above this method for the right: 64 rationale) — and,
+      // deliberately, the *same* right: 64 the wave-height-legend/date-time
+      // cluster further down this Stack uses, so this box's right edge
+      // lines up with that cluster's right edge (2026-08-02 request).
+      // Same position on mobile as desktop — see the scale-factor comment
+      // above for why 64/40 are never multiplied by scale.
       right: 64,
       top: 40,
       child: IgnorePointer(
@@ -2729,8 +2969,8 @@ class _MapScreenState extends State<MapScreen> {
             // rather than overflow past it, not to make the overflow itself
             // interactive.
             child: Container(
-              constraints: const BoxConstraints(maxWidth: 240),
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+              constraints: BoxConstraints(maxWidth: 240 * scale),
+              padding: EdgeInsets.symmetric(horizontal: 14 * scale, vertical: 10 * scale),
               decoration: BoxDecoration(
                 color: Colors.white,
                 border: Border.all(color: const Color(0xFF0D2436), width: 2),
@@ -2740,25 +2980,25 @@ class _MapScreenState extends State<MapScreen> {
                 mainAxisSize: MainAxisSize.min,
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  const Text(
+                  Text(
                     'Typhoon',
                     textAlign: TextAlign.center,
-                    style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600),
+                    style: TextStyle(fontSize: 15 * scale, fontWeight: FontWeight.w600),
                   ),
-                  const SizedBox(height: 8),
+                  SizedBox(height: 8 * scale),
                   for (var i = 0; i < rows.length; i++) ...[
-                    if (i > 0) const SizedBox(height: 6),
+                    if (i > 0) SizedBox(height: 6 * scale),
                     Row(
                       children: [
                         Expanded(
                           child: Text(
                             rows[i].label,
                             overflow: TextOverflow.ellipsis,
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: rows[i].color),
+                            style: TextStyle(fontSize: 13 * scale, fontWeight: FontWeight.w600, color: rows[i].color),
                           ),
                         ),
-                        const SizedBox(width: 10),
-                        Container(width: 36, height: 3, color: rows[i].color),
+                        SizedBox(width: 10 * scale),
+                        Container(width: 36 * scale, height: 3 * scale, color: rows[i].color),
                       ],
                     ),
                   ],
@@ -2798,10 +3038,13 @@ class _MapScreenState extends State<MapScreen> {
   // ceiling instead of compressing as the range grows.
   Widget? _buildWaveHeightLegend() {
     if (!kPersonalBuild || !_waveFieldDisplayEnabled || _waveFieldGrid == null) return null;
+    // Mobile (2026-08-02 request): shrunk to 50% — see the matching comment
+    // in _buildPassagePlanLegend for why a single multiplier is used.
+    final scale = _isMobileUi ? 0.5 : 1.0;
     const maxMeters = 8;
-    const barHeight = maxMeters * 20.0;
+    final barHeight = maxMeters * 20.0 * scale;
     return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      padding: EdgeInsets.symmetric(horizontal: 8 * scale, vertical: 8 * scale),
       decoration: BoxDecoration(
         color: Colors.white.withOpacity(0.85),
         border: Border.all(color: const Color(0xFF0D2436), width: 1.5),
@@ -2810,8 +3053,8 @@ class _MapScreenState extends State<MapScreen> {
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
-          const Text('Wave (m)', style: TextStyle(fontSize: 10, fontWeight: FontWeight.w600)),
-          const SizedBox(height: 4),
+          Text('Wave (m)', style: TextStyle(fontSize: 10 * scale, fontWeight: FontWeight.w600)),
+          SizedBox(height: 4 * scale),
           SizedBox(
             height: barHeight,
             child: Row(
@@ -2825,12 +3068,12 @@ class _MapScreenState extends State<MapScreen> {
                   mainAxisAlignment: MainAxisAlignment.spaceBetween,
                   children: [
                     for (var m = maxMeters; m >= 0; m--)
-                      Text('$m', style: const TextStyle(fontSize: 9, color: Colors.black87)),
+                      Text('$m', style: TextStyle(fontSize: 9 * scale, color: Colors.black87)),
                   ],
                 ),
-                const SizedBox(width: 4),
+                SizedBox(width: 4 * scale),
                 Container(
-                  width: 14,
+                  width: 14 * scale,
                   decoration: BoxDecoration(
                     gradient: const LinearGradient(
                       begin: Alignment.bottomCenter,
@@ -2866,28 +3109,14 @@ class _MapScreenState extends State<MapScreen> {
     final hasTimeline = _maxOffsetHours > 0;
 
     return Scaffold(
-      appBar: AppBar(
-        title: const Text('Typhoon & ship tracker'),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.directions_boat),
-            tooltip: 'Passage Plan',
-            onPressed: _showPassagePlanDialog,
-          ),
-          // Renamed from "Information" (2026-08-xx): Range Ring moved out of
-          // its own standalone AppBar menu (see the removed PopupMenuButton
-          // that used to sit here — now a per-typhoon-slot checkbox inside
-          // this dialog, see _showLabelSettingsDialog's rangeRingAndColorRow)
-          // and Ship's Name moved to the Passage Plan dialog, leaving this
-          // button as purely the typhoon Forecast entry point.
-          IconButton(
-            icon: const Icon(Icons.edit_note),
-            tooltip: 'Forecast',
-            onPressed: _showLabelSettingsDialog,
-          ),
-        ],
-      ),
-      body: Column(
+      // Mobile (2026-08-02): no persistent AppBar — the map fills the whole
+      // screen instead, and the same AppBar content reappears as a
+      // double-tap-to-reveal overlay (see the mobile-only Stack layer
+      // below). Desktop is unaffected — always-on AppBar exactly as before.
+      appBar: _isMobileUi ? null : _buildAppBar(),
+      body: Stack(
+        children: [
+          Column(
         children: [
           Expanded(
             child: LayoutBuilder(
@@ -2904,7 +3133,31 @@ class _MapScreenState extends State<MapScreen> {
                 final typhoonLegend = _buildTyphoonLegend(constraints.maxHeight);
                 return Stack(
               children: [
-                MouseRegion(
+                // Mobile cursor mode (2026-08-02 request, revised same day
+                // — see _mobileCursorActivePointers' doc comment for why
+                // this is a Listener rather than GestureDetector.onPan*):
+                // long-press anywhere on the map to drop a crosshair, then
+                // drag with one finger (whether still holding from the
+                // long-press or after releasing and touching again) to move
+                // it; a second finger joining pinch-zooms instead, untouched
+                // by this Listener; short tap dismisses. Wraps MouseRegion
+                // rather than the innermost GestureDetector (below, inside
+                // InteractiveViewer's transformed child) specifically so
+                // localPosition here is already viewport-space, matching
+                // _latLonAtViewportPoint/_handleHover and letting the
+                // crosshair overlay be drawn as a plain Positioned with no
+                // zoom-correction math. All callbacks are null on desktop,
+                // so neither a LongPressGestureRecognizer nor this Listener
+                // observes anything there — zero interaction with the
+                // existing mouse-only hover/drag behavior.
+                Listener(
+                  onPointerDown: _isMobileUi ? _handleMobileCursorPointerDown : null,
+                  onPointerMove: _isMobileUi ? _handleMobileCursorPointerMove : null,
+                  onPointerUp: _isMobileUi ? _handleMobileCursorPointerUpOrCancel : null,
+                  onPointerCancel: _isMobileUi ? _handleMobileCursorPointerUpOrCancel : null,
+                  child: GestureDetector(
+                  onLongPressStart: _isMobileUi ? _handleMobileCursorLongPressStart : null,
+                  child: MouseRegion(
                   onHover: _handleHover,
                   onExit: (_) => setState(() => _cursorLatLon = null),
                   // 2026-07-28 bug fix: this used to wrap InteractiveViewer
@@ -2927,6 +3180,22 @@ class _MapScreenState extends State<MapScreen> {
                     minScale: _minZoom,
                     maxScale: _maxZoom,
                     constrained: false,
+                    // Pan disabled while mobile cursor mode is active
+                    // (2026-08-02 request) — avoids the drag-vs-drag
+                    // conflict between moving the crosshair and panning the
+                    // map. Always true (default) on desktop and on mobile
+                    // outside cursor mode, so this changes nothing there.
+                    panEnabled: !(_isMobileUi && _mobileCursorModeActive),
+                    // Pinch-zoom deliberately left enabled even during
+                    // cursor mode (2026-08-02 follow-up: "パンのみ無効と
+                    // し、ズームは有効にしてみてください。競合して操作
+                    // 難しかったら戻します。") — pinch is a two-finger
+                    // gesture, so it shouldn't compete with the one-finger
+                    // drag this mode uses to move the crosshair. If real-
+                    // device testing shows the two do conflict in practice,
+                    // revert this to match panEnabled above (both disabled
+                    // together, as it was originally).
+                    scaleEnabled: true,
                     child: SizedBox(
                       width: MapBounds.canvasWidth,
                       height: MapBounds.canvasHeight,
@@ -2939,7 +3208,33 @@ class _MapScreenState extends State<MapScreen> {
                       // pan/pinch gesture recognizers.
                       child: GestureDetector(
                         behavior: HitTestBehavior.opaque,
-                        onTapUp: (details) => _handleMapTap(details.localPosition),
+                        onTapUp: (details) {
+                          // Mobile cursor mode (2026-08-02 request): a short
+                          // tap while the crosshair is showing dismisses it
+                          // instead of toggling a typhoon's Range Ring —
+                          // checked here rather than via a second tap
+                          // recognizer higher up the tree (see the
+                          // long-press GestureDetector wrapping MouseRegion
+                          // above) to avoid two independent
+                          // TapGestureRecognizers both entering the arena
+                          // for the same tap.
+                          if (_isMobileUi && _mobileCursorModeActive) {
+                            _exitMobileCursorMode();
+                            return;
+                          }
+                          _handleMapTap(details.localPosition);
+                        },
+                        // Mobile-only (2026-08-02 request, replacing an
+                        // earlier edge-swipe attempt that conflicted with
+                        // map panning): quick double-tap anywhere on the
+                        // map reveals the AppBar/playback bar overlay (see
+                        // _showMobileChrome, _buildMobileChromeOverlays).
+                        // null on desktop — not just "does nothing" but
+                        // registers no DoubleTapGestureRecognizer at all
+                        // there, so onTapUp above keeps firing immediately
+                        // with no double-tap disambiguation delay added to
+                        // the existing tap-to-toggle-rings interaction.
+                        onDoubleTap: _isMobileUi ? _showMobileChrome : null,
                         child: CustomPaint(
                           painter: MapPainter(
                             ships: ships,
@@ -2959,9 +3254,31 @@ class _MapScreenState extends State<MapScreen> {
                     ),
                   ),
                 ),
+                ),
+                ),
                 Positioned.fill(child: _buildGridLabelOverlay()),
+                // Mobile cursor-mode crosshair (2026-08-02 request): drawn
+                // as a plain Positioned in viewport space, matching
+                // _mobileCursorViewportPos's coordinate space exactly (see
+                // the field doc comment) — no zoom-correction needed since
+                // this sits outside InteractiveViewer's transform, same as
+                // the grid label overlay above. IgnorePointer so it never
+                // steals the tap that's meant to dismiss it (handled by the
+                // inner GestureDetector's onTapUp instead).
+                if (_isMobileUi && _mobileCursorModeActive && _mobileCursorViewportPos != null)
+                  Positioned(
+                    left: _mobileCursorViewportPos!.dx - 14,
+                    top: _mobileCursorViewportPos!.dy - 14,
+                    child: const IgnorePointer(child: _MobileCursorCrosshair()),
+                  ),
                 if (passagePlanLegend != null) passagePlanLegend,
                 if (typhoonLegend != null) typhoonLegend,
+                // Mobile (2026-08-02 request): removed entirely, not just
+                // hidden-behind-swipe — InteractiveViewer's own pinch-to-zoom
+                // already drives the same _zoom/_transformationController
+                // state these buttons/slider do, so nothing is lost.
+                // Desktop keeps this exactly as before.
+                if (!_isMobileUi)
                 Positioned(
                   right: 12,
                   top: 12,
@@ -3061,9 +3378,80 @@ class _MapScreenState extends State<MapScreen> {
               },
             ),
           ),
-          if (hasTimeline) SafeArea(top: false, child: _buildPlaybackBar()),
+          // Desktop: always-on, as before. Mobile: moved into the
+          // double-tap-to-reveal overlay layer below instead (kept out of
+          // this Column so it never takes space away from the map above it).
+          if (!_isMobileUi && hasTimeline) SafeArea(top: false, child: _buildPlaybackBar()),
+        ],
+          ),
+          if (_isMobileUi) ..._buildMobileChromeOverlays(hasTimeline),
         ],
       ),
+    );
+  }
+
+  // Mobile-only overlay layer (2026-08-02 request): the AppBar and playback
+  // bar as absolutely-positioned, reveal-on-double-tap overlays stacked on
+  // top of the map above — never affects the Column/Expanded sizing of the
+  // map itself, so the map never shrinks whether this chrome is shown or
+  // hidden. The trigger itself (double-tap anywhere on the map) lives on
+  // the map's own GestureDetector in build(), not here — see that
+  // GestureDetector's onDoubleTap. A Listener on each revealed bar itself
+  // resets the auto-hide countdown on any touch inside it, so tapping a
+  // button doesn't dismiss it out from under the user. See
+  // docs/devlog-mobile-flutter.md.
+  List<Widget> _buildMobileChromeOverlays(bool hasTimeline) {
+    return [
+      AnimatedPositioned(
+        duration: _mobileChromeAnimDuration,
+        curve: Curves.easeOut,
+        top: _mobileChromeVisible ? 0 : -200,
+        left: 0,
+        right: 0,
+        child: Listener(
+          onPointerDown: (_) => _showMobileChrome(),
+          child: SafeArea(bottom: false, child: _buildAppBar()),
+        ),
+      ),
+      if (hasTimeline)
+        AnimatedPositioned(
+          duration: _mobileChromeAnimDuration,
+          curve: Curves.easeOut,
+          bottom: _mobileChromeVisible ? 0 : -200,
+          left: 0,
+          right: 0,
+          child: Listener(
+            onPointerDown: (_) => _showMobileChrome(),
+            child: SafeArea(top: false, child: _buildPlaybackBar()),
+          ),
+        ),
+    ];
+  }
+
+  // Shared between the desktop Scaffold.appBar slot and the mobile
+  // double-tap-to-reveal overlay (see _buildMobileChromeOverlays) — same
+  // widget, two different places it gets mounted.
+  AppBar _buildAppBar() {
+    return AppBar(
+      title: const Text('Typhoon & ship tracker'),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.directions_boat),
+          tooltip: 'Passage Plan',
+          onPressed: _showPassagePlanDialog,
+        ),
+        // Renamed from "Information" (2026-08-xx): Range Ring moved out of
+        // its own standalone AppBar menu (see the removed PopupMenuButton
+        // that used to sit here — now a per-typhoon-slot checkbox inside
+        // this dialog, see _showLabelSettingsDialog's rangeRingAndColorRow)
+        // and Ship's Name moved to the Passage Plan dialog, leaving this
+        // button as purely the typhoon Forecast entry point.
+        IconButton(
+          icon: const Icon(Icons.edit_note),
+          tooltip: 'Forecast',
+          onPressed: _showLabelSettingsDialog,
+        ),
+      ],
     );
   }
 
@@ -3355,4 +3743,37 @@ class _BubbleTailPainter extends CustomPainter {
 
   @override
   bool shouldRepaint(covariant _BubbleTailPainter oldDelegate) => oldDelegate.color != color;
+}
+
+// Red crosshair marker for mobile cursor mode (2026-08-02 request:
+// "赤十字カーソル" — a red cross showing the touched map point). Fixed
+// 28x28 on-screen size; a white halo behind each red bar keeps it visible
+// over any map color (sea blue, land green, cloud white, etc.), same
+// "readable regardless of background" idea already used for the date-time/
+// legend boxes' white-ish backgrounds elsewhere in this file. Plain
+// stacked Containers rather than a CustomPainter — simple enough not to
+// need one, unlike MapPainter's actual map content.
+class _MobileCursorCrosshair extends StatelessWidget {
+  const _MobileCursorCrosshair();
+
+  static const double _size = 28;
+  static const double _thickWidth = 4;
+  static const double _thinWidth = 2;
+
+  @override
+  Widget build(BuildContext context) {
+    return SizedBox(
+      width: _size,
+      height: _size,
+      child: Stack(
+        alignment: Alignment.center,
+        children: const [
+          SizedBox(width: _size, height: _thickWidth, child: ColoredBox(color: Colors.white)),
+          SizedBox(width: _thickWidth, height: _size, child: ColoredBox(color: Colors.white)),
+          SizedBox(width: _size, height: _thinWidth, child: ColoredBox(color: Colors.red)),
+          SizedBox(width: _thinWidth, height: _size, child: ColoredBox(color: Colors.red)),
+        ],
+      ),
+    );
+  }
 }

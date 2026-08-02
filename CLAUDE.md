@@ -19,7 +19,7 @@
 
 ## 現状の要約（今後の判断に必要な最重要事項のみ）
 
-**索引（詳細の置き場所）**：データソース選定・地図表示・距離計算の経緯・却下案＝`docs/devlog-map-design.md`／地図オーバーレイ（グリッド追従・カーソル座標・船向き）＝`docs/devlog-map-overlays.md`／ズーム時の描画固定＝`docs/devlog-map-zoom-rendering.md`／ホイールズーム不具合＝`docs/devlog-wheel-zoom.md`／Passage Plan複数CSV対応＝`docs/devlog-passage-plan-multi.md`／CSVライブラリ＝`docs/devlog-csv-library.md`／オンライン化・海上気象データ検討＝`docs/devlog-online-xml.md`／今後の開発方針＝`docs/devlog-architecture-roadmap.md`／2026-07-31のUI微調整・波の場設計・AppBar構成の詳細＝`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`／再生位置リセットバグ＝`docs/devlog-playback-anchor-reset.md`／保存先のexe相対Data化＝`docs/devlog-portable-data-dir.md`／外部データ形式（JMA/JTWC/CSV）＝`docs/data-format-notes.md`／実装ごとの完了記録＝`docs/completed-log.md`。
+**索引（詳細の置き場所）**：データソース選定・地図表示・距離計算の経緯・却下案＝`docs/devlog-map-design.md`／地図オーバーレイ（グリッド追従・カーソル座標・船向き）＝`docs/devlog-map-overlays.md`／ズーム時の描画固定＝`docs/devlog-map-zoom-rendering.md`／ホイールズーム不具合＝`docs/devlog-wheel-zoom.md`／Passage Plan複数CSV対応＝`docs/devlog-passage-plan-multi.md`／CSVライブラリ＝`docs/devlog-csv-library.md`／オンライン化・海上気象データ検討＝`docs/devlog-online-xml.md`／今後の開発方針＝`docs/devlog-architecture-roadmap.md`／2026-07-31のUI微調整・波の場設計・AppBar構成の詳細＝`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`／再生位置リセットバグ＝`docs/devlog-playback-anchor-reset.md`／保存先のexe相対Data化＝`docs/devlog-portable-data-dir.md`／外部データ形式（JMA/JTWC/CSV）＝`docs/data-format-notes.md`／実装ごとの完了記録＝`docs/completed-log.md`／モバイル対応（Android先行）着手経緯＝`docs/devlog-mobile-flutter.md`。
 
 - **MVP順序**：デスクトップアプリから着手し、後にスマホへ展開する。
 - **台風データソース**：JMA防災情報XMLとJTWC（米軍）テキストを、フォールバックではなく両方同時・独立表示（2026-07-28確定、台風スロットごとにDisplay/色/Range Ringを両ソース独立設定可）。取得は両ソースとも「Import」ボタンの手動トリガー方式でオフラインキャッシュ、複数台風同時発表時は「Import All」で一括反映可。WNI（有料API）・手動グリッド読み取りは却下。詳細は`docs/devlog-map-design.md`・`docs/completed-log.md`参照。
@@ -36,6 +36,7 @@
 - **登録情報の永続化**：船名・Passage Plan・台風情報・UI設定はJSON永続化し次回起動時に自動復元（2026-07-27実装、`lib/utils/app_state_storage.dart`）。**保存先はWindowsではexe相対の`UserData`フォルダ（ポータブルzip内、2026-08-01変更）**：以前はOSのper-user AppDataフォルダで、zipフォルダをコピーしても別デバイスに引き継がれなかったため変更。CSVライブラリ・波の場キャッシュも同様（`lib/utils/portable_storage_dir.dart`）。当初フォルダ名を`Data`にしていたところFlutter自身の必須フォルダ`data`とWindowsの大文字小文字非区別で衝突し起動不能になる不具合が発生、`UserData`に改名して解消（教訓含め`docs/devlog-portable-data-dir.md`参照）。トレードオフ（`flutter clean`で消える、Debug/Releaseで別データ）・旧保存先からの移行処理も同ファイル参照。地図位置・ズーム・再生位置は対象外。
 - **配布**：`build_release.bat`で`flutter build windows --release`＋ポータブルZip作成（2026-07-27追加）。Flutter SDK不要で起動可能。
 - **今後の開発方針**（仮・2026-07-28合意）：オンライン化→モバイル対応の順で同一プロジェクト・`main`ブランチで進める。ブランチ運用は②モバイル対応着手時から適用。詳細・判断基準は`docs/devlog-architecture-roadmap.md`参照。
+- **モバイル対応（Android先行）**（2026-08-02）：機能・デザインはデスクトップ版と共通、横向き固定、画面サイズ差分とタッチ操作のみ個別調整する方針。`android/`雛形生成済み、コア機能・モバイル専用UI一式（全画面地図・ダブルタップでのメニュー表示・凡例位置等）・長押しクロスヘアでの緯度経度表示（トラックパッド式相対移動、2本指ピンチと競合なし）を実装し、実機テストをユーザーが完了（「モバイルもほぼ完了です」）。残りは`productFlavors`（本流／個人の別アプリ化）等一部確認項目のみ（`TASKS.md`参照）。`feature/mobile`ブランチ運用。詳細は`docs/devlog-mobile-flutter.md`参照。
 - **オンライン化フェーズ①のスコープ**（2026-07-29確定）：JMA自動取得は手動ボタンのまま、取得結果の永続化キャッシュのみ実装。
 - **地方海上予報（VPCY51）は不採用・全削除済み**（2026-07-31）：ユーザーの仕様変更依頼を受けて撤去。削除済みファイル一覧・確認経緯は`docs/devlog-2026-07-31-ui-polish-and-wave-field-design.md`参照。海上気象データはOpen-Meteo波の場（個人用）のみ残存。
 - **git運用**：`git init`済み、リモート`origin`（`https://github.com/captedge/tyohoon_npo.git`）追加済み（2026-07-25、詳細`docs/completed-log.md`）。commit/pushはユーザーが「コミットして」と発言した時のみ`commit.bat`経由（`docs/operation-rules.md`のgit運用ルールに従う）。

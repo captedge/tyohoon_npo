@@ -1,7 +1,7 @@
 name: typhoon_ship_tracker
 description: Typhoon course and ship position tracker (offline-first, desktop and mobile).
 publish_to: "none"
-version: 0.1.0
+version: 0.1.0+1
 
 environment:
   sdk: ">=3.3.0 <4.0.0"
