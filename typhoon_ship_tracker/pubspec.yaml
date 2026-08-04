@@ -28,6 +28,17 @@ dependencies:
   # のようなWindowsデスクトップビルド特有の追加設定は不要（docs/operation-rules.md
   # 完了報告前チェック項目7の確認事項）。
   xml: ^7.0.1
+  # About画面のバージョン表示用（2026-08-04追加）。Windows実装はwin32（純Dart FFI、
+  # システムDLL呼び出しのみ）に依存しており、file_picker導入時のようなsymlink/
+  # Visual Studio C++ワークロード要件のある独自ネイティブプラグインではないことを
+  # pub.devの依存関係一覧（win32/ffi/http/path/clock/meta、いずれも純Dart）で確認
+  # 済み（docs/operation-rules.md完了報告前チェック項目7の確認事項）。バージョンは
+  # 最新の10.1.0ではなく9.0.1を指定：10系はDart SDK 3.10/3.11以上が必要だが、この
+  # プロジェクトの`environment.sdk`は">=3.3.0"としか宣言しておらず実機のFlutter/Dart
+  # バージョンが不明なため、`environment.sdk`と同じ3.3を要求する9.0.1（2026-03-30公開、
+  # 現行メンテ範囲内）を選び、`flutter pub get`が未知のSDKバージョン不一致で失敗する
+  # リスクを避けた。
+  package_info_plus: ^9.0.1
 
 dev_dependencies:
   flutter_test:

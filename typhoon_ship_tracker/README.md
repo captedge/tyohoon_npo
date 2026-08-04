@@ -1,17 +1,16 @@
 # typhoon_ship_tracker
 
-A new Flutter project.
+The Flutter project for **Typhoon & Ship Tracker**. See the
+[repository root README](../README.md) for what this app does, data source
+credits, the privacy policy link, and the license (all rights reserved).
 
-## Getting Started
+## Building
 
-This project is a starting point for a Flutter application.
+- Windows: double-click `run_windows.bat` (or `flutter run -d windows`) from
+  the repository root.
+- Android: double-click `run_android.bat` (or `flutter run`) from the
+  repository root.
 
-A few resources to get you started if this is your first Flutter project:
-
-- [Learn Flutter](https://docs.flutter.dev/get-started/learn-flutter)
-- [Write your first Flutter app](https://docs.flutter.dev/get-started/codelab)
-- [Flutter learning resources](https://docs.flutter.dev/reference/learning-resources)
-
-For help getting started with Flutter development, view the
-[online documentation](https://docs.flutter.dev/), which offers tutorials,
-samples, guidance on mobile development, and a full API reference.
+See `docs/flutter-windows-env-notes.md` (repository root) for this project's
+known Flutter/Windows environment quirks before troubleshooting a build
+issue.

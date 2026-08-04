@@ -7,6 +7,8 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart' show Clipboard, ClipboardData;
+import 'package:package_info_plus/package_info_plus.dart';
 
 import '../models/ship_waypoint.dart';
 import '../models/track_point.dart';
@@ -2665,6 +2667,186 @@ class _MapScreenState extends State<MapScreen> {
     shipNameController.dispose();
   }
 
+  // About / Legal dialog (2026-08-04, public-release prep — see
+  // docs/release-checklist.md): data source credits, privacy policy link,
+  // open-source license list (Flutter's built-in showLicensePage — no need
+  // to hand-collect each dependency's license text), copyright, and a
+  // navigation-safety disclaimer. Follows the same AlertDialog/width-460/
+  // 80%-height-cap/SingleChildScrollView pattern as _showPassagePlanDialog
+  // above for visual consistency.
+  //
+  // NOTE: this URL is the GitHub Pages address decided in
+  // docs/release-checklist.md but not yet verified live (Pages must still
+  // be enabled once — see that file's "GitHub Pages有効化手順"). Confirm the
+  // page actually loads at this address after enabling Pages, and update
+  // this constant if the real URL differs.
+  static const _privacyPolicyUrl = 'https://captedge.github.io/tyohoon_npo/privacy-policy.html';
+
+  Future<void> _showAboutDialog() async {
+    await showDialog<void>(
+      context: context,
+      builder: (dialogContext) {
+        // StatefulBuilder wrapper added 2026-08-04 after a real-device test
+        // found the "Copy link" button copied the text but never showed any
+        // confirmation. Root cause: the original onPressed showed a
+        // ScaffoldMessenger SnackBar, but a SnackBar renders inside the
+        // Scaffold, which sits *behind* this AlertDialog's modal barrier in
+        // the Overlay stack — so it was hidden the whole time the dialog
+        // stayed open (a well-known Flutter gotcha, not a context-lookup
+        // bug — the earlier context fix was correct but insufficient).
+        // Fixed by showing the confirmation inline (the copy icon morphs
+        // into a check mark for 2 seconds) instead of depending on the
+        // Scaffold at all, which needs local dialog state — hence
+        // StatefulBuilder here, matching _showPassagePlanDialog's pattern.
+        var copied = false;
+        return StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            return AlertDialog(
+              title: const Text('About'),
+              content: SizedBox(
+                width: 460,
+                child: ConstrainedBox(
+                  constraints: BoxConstraints(maxHeight: MediaQuery.of(dialogContext).size.height * 0.8),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Text(
+                          'Typhoon & Ship Tracker',
+                          style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
+                        const SizedBox(height: 4),
+                        FutureBuilder<PackageInfo>(
+                          future: PackageInfo.fromPlatform(),
+                          builder: (context, snapshot) {
+                            final info = snapshot.data;
+                            final text = info == null
+                                ? 'Version...'
+                                : 'Version ${info.version} (build ${info.buildNumber})';
+                            return Text(text, style: const TextStyle(color: Colors.black54));
+                          },
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(height: 1),
+                        const SizedBox(height: 12),
+                        const Text('Data Sources', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        const Text('•  Typhoon forecasts: Japan Meteorological Agency (JMA)'),
+                        const Text('•  Typhoon warnings: Joint Typhoon Warning Center (JTWC), U.S. Navy'),
+                        const Text('•  Coastline data: Natural Earth (public domain)'),
+                        const SizedBox(height: 8),
+                        // Bilingual (2026-08-04 request): most users are
+                        // expected to be Japanese captains navigating near
+                        // Japan, so this note and the Disclaimer below pair
+                        // the English text with a Japanese translation. This
+                        // is a deliberate, narrow exception to this app's
+                        // usual English-only UI convention (CLAUDE.md
+                        // "表示は英語表記") — limited to these two
+                        // legal/safety notices, not a general policy change.
+                        const Text(
+                          'Typhoon positions and forecasts shown in this app are for reference and '
+                          'voyage planning only, and are not an official real-time feed guaranteed '
+                          'by JMA or JTWC.',
+                          style: TextStyle(fontSize: 12, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          '本アプリに表示される台風の位置・予報は参考および航海計画立案のためのものであり、'
+                          '気象庁（JMA）やJTWCが保証する公式のリアルタイム情報ではありません。',
+                          style: TextStyle(fontSize: 12, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(height: 1),
+                        const SizedBox(height: 12),
+                        const Text('Privacy Policy', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        Row(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            const Expanded(
+                              child: SelectableText(
+                                _privacyPolicyUrl,
+                                style: TextStyle(color: Colors.blue, fontSize: 13),
+                              ),
+                            ),
+                            IconButton(
+                              icon: Icon(
+                                copied ? Icons.check : Icons.copy,
+                                size: 18,
+                                color: copied ? Colors.green : null,
+                              ),
+                              tooltip: copied ? 'Copied' : 'Copy link',
+                              padding: EdgeInsets.zero,
+                              constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
+                              onPressed: () async {
+                                await Clipboard.setData(const ClipboardData(text: _privacyPolicyUrl));
+                                if (!dialogContext.mounted) return;
+                                setDialogState(() => copied = true);
+                                Future.delayed(const Duration(seconds: 2), () {
+                                  if (dialogContext.mounted) setDialogState(() => copied = false);
+                                });
+                              },
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(height: 1),
+                        const SizedBox(height: 12),
+                        const Text('License', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        const Text(
+                          '© 2026 Capt.Edge. All rights reserved.',
+                          style: TextStyle(fontSize: 13),
+                        ),
+                        const SizedBox(height: 8),
+                        OutlinedButton(
+                          onPressed: () {
+                            showLicensePage(
+                              context: dialogContext,
+                              applicationName: 'Typhoon & Ship Tracker',
+                              applicationLegalese: '© 2026 Capt.Edge. All rights reserved.',
+                            );
+                          },
+                          child: const Text('Open-Source Licenses'),
+                        ),
+                        const SizedBox(height: 12),
+                        const Divider(height: 1),
+                        const SizedBox(height: 12),
+                        const Text('Disclaimer', style: TextStyle(fontWeight: FontWeight.bold)),
+                        const SizedBox(height: 4),
+                        const Text(
+                          'This app is intended for voyage planning and reference purposes only. '
+                          'Always base actual navigation decisions on official sources (JMA, JTWC, '
+                          'and other competent authorities). The developer accepts no liability for '
+                          'damages arising from the use of this app.',
+                          style: TextStyle(fontSize: 12, color: Colors.black54),
+                        ),
+                        const SizedBox(height: 4),
+                        const Text(
+                          '本アプリは航海計画の立案および参考情報の提供のみを目的としています。'
+                          '実際の航海に関する判断は、必ず気象庁・JTWCなど公式情報源に基づいて行って'
+                          'ください。本アプリの利用により生じたいかなる損害についても、開発者は責任を'
+                          '負いません。',
+                          style: TextStyle(fontSize: 12, color: Colors.black54),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Close'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
   // Source-prefixed labels (2026-07-28), e.g. "JTWC12W (NOUL)"/"JMA13TS
   // (DOLPHIN)" — shared by the map markers (_typhoonMarkers) and the
   // Typhoon legend overlay (_buildTyphoonLegend) so the two never drift out
@@ -3466,6 +3648,17 @@ class _MapScreenState extends State<MapScreen> {
           icon: const Icon(Icons.edit_note),
           tooltip: 'Forecast',
           onPressed: _showLabelSettingsDialog,
+        ),
+        // Added 2026-08-04 (public-release prep): data source credits
+        // (JMA/JTWC/Natural Earth), privacy policy link, open-source
+        // license list, copyright, and a navigation-safety disclaimer. This
+        // is a third AppBar icon — supersedes the "AppBar fixed to exactly
+        // two icons" policy CLAUDE.md recorded on 2026-07-31 (see
+        // docs/release-checklist.md for the 2026-08-04 decision record).
+        IconButton(
+          icon: const Icon(Icons.info_outline),
+          tooltip: 'About',
+          onPressed: _showAboutDialog,
         ),
       ],
     );

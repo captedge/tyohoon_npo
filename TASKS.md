@@ -25,6 +25,11 @@
 
 ## 決定待ち・要確認事項
 
+- [ ] **本流公開に向けた法務系項目：5点の方針決定・3つの実装（プライバシーポリシー本文・About画面・README）すべて完了（2026-08-04、経緯・詳細は`docs/release-checklist.md`・`docs/completed-log.md`参照）。残るのは以下のみ**：
+  - [ ] （次回コミット待ち）commit.batで一連の変更をコミット・push
+  - [ ] GitHub Pages有効化（Settings→Pages→branch: main, folder: /docs、手順は`docs/release-checklist.md`）→公開URLを確認
+  - [ ] （Windows実機確認待ち）About画面の英日併記2箇所（Data Sources注記・Disclaimer）の表示崩れがないか確認、⑤モバイル版でも同じAboutダイアログが開くこと（未確認）
+
 - **「Open-Meteo marine (trial)」メニュー削除の要望（2026-07-31仕様変更で依頼）について、対象となる独立メニュー項目がコード上に見当たらないことを確認**：2026-07-29時点では船の現在位置で試し取得するだけの独立ダイアログ（AppBarの専用ボタン）として存在したが、2026-07-30の「固定エリア・手動Import方式」への全面再設計時に、この独立ダイアログ自体が廃止され、Display切替・Importボタンとも「Forecast」（旧Information）ダイアログ内の「Wave Field (Open-Meteo, personal build)」セクション1つに統合済みだった（`_showLabelSettingsDialog`、AppBarには対応するボタンなし）。ユーザーが「取得はInformationからできるため不要」と説明した独立メニューは、この統合により既に存在しない状態と見られる。Wave Field機能本体・個人用ビルドの仕組み（`kPersonalBuild`）はユーザー指示により削除せず維持。次回セッションでWindows実機の実際のメニュー表示を見ながら、削除すべき項目が本当に残っていないか再確認する。
 - より高精細な海岸線データ（1:10m相当）への差し替え（優先度低、`docs/devlog-map-design.md`参照）
 - **デザイン・仕様は2026-07-31時点でユーザー判断によりほぼ完了**（本人発言：「デザイン、仕様、ほぼ完了と思っています」）。アプリ名称は今後変更の可能性あり（未着手、着手時期未定）。上記「未着手・進行中」に残るWindows実機確認待ち項目群の消化が次の主な作業。
