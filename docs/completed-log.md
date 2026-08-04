@@ -5,7 +5,7 @@
 書式：
 `**タイトル**（日付、コミットハッシュ、該当すればブランチ名）— 結論1〜2行。詳細は`docs/devlog-xxx.md`（devlogを作らない軽微な変更なら省略）。`
 
-**JMA/JTWC/check_status.bat関連の変更をコミット（`20c1018`、feature/mobile）、ただしコミットメッセージが前回セッションの内容のまま誤って使われていたことが判明**（2026-08-04）— `commit_message.txt`を更新せずに`commit.bat`実行を案内してしまい、実際の差分（JMA/JTWC修正等7ファイル）とは無関係な古いメッセージでコミットされた。差分自体は意図通りだったため実害は軽微。再発防止ルールを`docs/operation-rules.md`「commit_message.txtが前回セッションの内容のまま使い回された問題」に追加、`commit_message.txt`は次回用に正しい内容へ更新済み。当該コミットのメッセージ自体を訂正するかはユーザー判断待ち。
+**JMA/JTWC/check_status.bat関連の変更をコミット（`20c1018`、feature/mobile）、ただしコミットメッセージが前回セッションの内容のまま誤って使われていたことが判明**（2026-08-04）— `commit_message.txt`を更新せずに`commit.bat`実行を案内してしまい、実際の差分（JMA/JTWC修正等7ファイル）とは無関係な古いメッセージでコミットされた。差分自体は意図通りだったため実害は軽微。再発防止ルールを`docs/operation-rules.md`「commit_message.txtが前回セッションの内容のまま使い回された問題」に追加。ユーザーの希望で`fix_last_commit_message.bat`（`git commit --amend`＋`git push --force-with-lease`）を新規作成し実行、コミットメッセージを正しい内容に訂正済み（`20c1018`→`dc81c1c`、feature/mobile、force push成功確認済み）。
 
 **JMA自動取得が「予報の無い暫定/実況専用の発表」を掴んで予報軌跡が消える不具合を修正、Agentレビュー実施済み・Windows実機確認待ち**（2026-08-04）— 上記「0 forecast point(s)」確認後、ユーザーからJMA公式の台風情報サイトのスクリーンショット提供を受け、実際には17:45発表の電文に予報軌跡が存在することが判明（アプリの取得は17:01時点の実況時刻17:00の電文で予報無し）。「TYクラスでも予報が無いことがある」という前回の説明では説明がつかない実例のため再調査。`lib/utils/jma_feed_fetcher.dart`の`fetchLatestJmaTyphoon`（「Import from JMA」）・`fetchActiveJmaTyphoons`（「Import All (JMA)」）はいずれもフィード先頭（最新）の電文をそのまま採用する作りだったため、同じ「台風解析・予報情報」のタイトルを共有する実況専用の暫定発表が、正規の3時間毎・予報付き発表の直前に割り込むと予報無しの電文を掴んでしまう構造的な問題と判断。両関数に、最新電文に予報が無い場合は`_jmaIdentity`（eventID→号数+名称→URLの順）で同一台風と判定できる範囲でフィードを少し遡り、予報付きの電文が見つかればそちらを優先する処理を追加（予報が本当に存在しない台風は従来どおり実況のみで表示）。Agentツール（general-purpose）による独立レビュー実施——must-fix指摘なし。ユーザーがWindows実機で確認し、予報軌跡が正常に表示されることを確認済み。1回目の調査で「JMA側の発表仕様」と誤って結論した経緯・教訓は`docs/devlog-jma-forecast-missing-bulletin.md`参照。
 
