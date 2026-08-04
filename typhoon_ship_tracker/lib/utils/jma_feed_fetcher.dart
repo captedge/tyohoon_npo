@@ -115,15 +115,70 @@ class JmaFetchResult {
 /// Returns a result with [JmaTyphoonInfo.empty]/null [JmaFetchResult.rawXml]
 /// (not an error) when the feed currently has no typhoon bulletin at all —
 /// the normal "nothing active right now" case. Throws [JmaFetchException]
-/// for network/HTTP failures, or [JmaXmlParseException] if a bulletin that
-/// *was* found doesn't parse as expected (see jma_xml_parser.dart).
-Future<JmaFetchResult> fetchLatestJmaTyphoon() async {
+/// for network/HTTP failures fetching the *newest* bulletin, or
+/// [JmaXmlParseException] if that bulletin doesn't parse as expected (see
+/// jma_xml_parser.dart) — both propagate exactly as before this function's
+/// 2026-08-04 change below, for the one fetch this function has always made
+/// unconditionally.
+///
+/// **2026-08-04 addition**: if that newest bulletin has no forecast track
+/// ([JmaTyphoonInfo.forecastTrack] empty — only a current position), this
+/// looks a little further down the feed (still capped at [maxCandidates]
+/// total fetches) for an *older* bulletin for the *same* storm (matched via
+/// [_jmaIdentity], same rule [fetchActiveJmaTyphoons] uses) that does have
+/// one, and prefers that instead. Real-world trigger (user report): a
+/// heavily-covered, clearly-forecast-bearing typhoon (per JMA's own public
+/// chart) showed "0 forecast point(s)" in this app — the newest `extra.xml`
+/// entry at fetch time was an interim/real-time-only update sharing the
+/// same "台風解析・予報情報" feed title as the regular ~3-hourly
+/// full-forecast bulletins (see [_findVptw60Urls]'s title-matching doc
+/// comment: intentionally loose, so it can't tell the two apart by title
+/// alone), landing ahead of the next full bulletin in feed order. A
+/// same-storm bulletin that genuinely never gets a forecast (e.g. a weak
+/// system JMA isn't yet forecasting 5 days out) is unaffected: nothing
+/// further down matches by identity and has a forecast either, so this
+/// falls back to the newest bulletin exactly as before.
+Future<JmaFetchResult> fetchLatestJmaTyphoon({int maxCandidates = 10}) async {
   final urls = await _findVptw60Urls();
   if (urls.isEmpty) return const JmaFetchResult(info: JmaTyphoonInfo.empty, rawXml: null);
-  final xmlText = await _fetchText(urls.first);
-  final info = parseJmaTyphoonXml(xmlText);
-  return JmaFetchResult(info: info, rawXml: xmlText);
+
+  final firstXmlText = await _fetchText(urls.first);
+  final firstInfo = parseJmaTyphoonXml(firstXmlText);
+  final newest = JmaFetchResult(info: firstInfo, rawXml: firstXmlText);
+  if (firstInfo.forecastTrack.isNotEmpty) return newest;
+
+  final targetIdentity = _jmaIdentity(firstInfo, urls.first);
+  for (final url in urls.skip(1).take(maxCandidates - 1)) {
+    final String xmlText;
+    final JmaTyphoonInfo info;
+    try {
+      xmlText = await _fetchText(url);
+      info = parseJmaTyphoonXml(xmlText);
+    } catch (_) {
+      // A failure on one of these *extra* look-further candidates shouldn't
+      // discard the newest result already in hand — unlike the
+      // unconditional fetch of urls.first above (which has no fallback and
+      // so lets its own failure propagate), this loop always has [newest]
+      // to fall back to. Same "one bad candidate doesn't hide the others"
+      // principle as fetchActiveJmaTyphoons.
+      continue;
+    }
+    if (_jmaIdentity(info, url) != targetIdentity) continue;
+    if (info.forecastTrack.isNotEmpty) return JmaFetchResult(info: info, rawXml: xmlText);
+  }
+  return newest;
 }
+
+/// Identifies which storm a parsed bulletin belongs to —
+/// [JmaTyphoonInfo.eventId] when present, else the number+name pair, else
+/// (a very early unnamed/unnumbered system with neither) [urlFallback]
+/// (the bulletin's own URL, unique per fetch and so never colliding with
+/// anything). Factored out of [fetchActiveJmaTyphoons] (2026-08-04) so
+/// [fetchLatestJmaTyphoon] can use the exact same "is this still the same
+/// storm" rule to tell an older bulletin for the same storm apart from a
+/// different storm further down the feed.
+String _jmaIdentity(JmaTyphoonInfo info, String urlFallback) =>
+    info.eventId ?? ((info.number != null || info.name != null) ? '${info.number ?? ''}/${info.name ?? ''}' : urlFallback);
 
 /// Fetches up to [maxResults] *distinct* currently-active typhoons from the
 /// extra.xml feed (2026-07-29 addition, for the Information dialog's "Fetch
@@ -153,6 +208,17 @@ Future<JmaFetchResult> fetchLatestJmaTyphoon() async {
 /// staleness cutoff would be a separate, more subjective judgment call this
 /// function isn't trying to make.
 ///
+/// **2026-08-04 addition**: for a storm whose newest-seen bulletin has no
+/// forecast track, a later (older, but still within [maxCandidates])
+/// same-storm bulletin that does have one now replaces it in [results] —
+/// same reasoning and trigger as [fetchLatestJmaTyphoon]'s doc comment
+/// (an interim/real-time-only update can land ahead of the next
+/// full-forecast bulletin for the same storm). Distinct-storm scanning
+/// itself is unchanged: still stops *adding new* identities once
+/// [maxResults] is reached, but keeps checking the remaining candidates
+/// (up to [maxCandidates]) for a forecast-track upgrade to a storm already
+/// in [results].
+///
 /// Returns an empty list (not an error) if the feed currently has no
 /// typhoon bulletin at all. Throws [JmaFetchException] for network/HTTP
 /// failures fetching the *list* feed itself; a failure fetching/parsing one
@@ -161,9 +227,8 @@ Future<JmaFetchResult> fetchLatestJmaTyphoon() async {
 Future<List<JmaFetchResult>> fetchActiveJmaTyphoons({int maxResults = 3, int maxCandidates = 10}) async {
   final urls = await _findVptw60Urls();
   final results = <JmaFetchResult>[];
-  final seenIdentities = <String>{};
+  final identityIndex = <String, int>{};
   for (final url in urls.take(maxCandidates)) {
-    if (results.length >= maxResults) break;
     final String xmlText;
     final JmaTyphoonInfo info;
     try {
@@ -175,10 +240,15 @@ Future<List<JmaFetchResult>> fetchActiveJmaTyphoons({int maxResults = 3, int max
       // batch — see this function's doc comment.
       continue;
     }
-    final identity = info.eventId ??
-        ((info.number != null || info.name != null) ? '${info.number ?? ''}/${info.name ?? ''}' : url);
-    if (!seenIdentities.add(identity)) continue;
-    results.add(JmaFetchResult(info: info, rawXml: xmlText));
+    final identity = _jmaIdentity(info, url);
+    final existingIndex = identityIndex[identity];
+    if (existingIndex == null) {
+      if (results.length >= maxResults) continue;
+      identityIndex[identity] = results.length;
+      results.add(JmaFetchResult(info: info, rawXml: xmlText));
+    } else if (results[existingIndex].info.forecastTrack.isEmpty && info.forecastTrack.isNotEmpty) {
+      results[existingIndex] = JmaFetchResult(info: info, rawXml: xmlText);
+    }
   }
   return results;
 }

@@ -6,6 +6,8 @@
 
 - [ ] （次回コミット待ち）今回の`.gitignore`修正（個人用ビルド生成物の除外追加）・関連ドキュメント更新をcommit.batでコミット・push（`cleanup_git_history.bat`実行時に作業ツリーがリセットされ一度失われたため再編集した分、2026-08-02）。
 
+- [ ] （Windows実機確認待ち、一部確認済み）JMA自動取得が予報無しの暫定電文を掴む不具合の修正（2026-08-04実装、Agentレビュー済み）：`lib/utils/jma_feed_fetcher.dart`の`fetchLatestJmaTyphoon`／`fetchActiveJmaTyphoons`に、最新電文に予報が無い場合は同一台風のより新しい予報付き電文を探して優先する処理を追加。**2613TY（DOLPHIN）で予報軌跡が復活することはユーザー確認済み。** 残り確認事項：①もう1つの台風（Typhoon 2枠）や「Import All (JMA)」でも同様に予報が正しく反映されること、②予報が本当に存在しない弱い熱帯低気圧等では従来どおり実況のみ（0件）で問題なく表示されること。
+
 - [ ] `android/app/build.gradle.kts`に本流／個人用の`productFlavors`を追加（別`applicationId`・別アプリ名で同一端末に両方インストール可能に、Windows版の別zip/別exeに相当）。それまでは`--dart-define=PERSONAL_BUILD=true`のみで本流／個人を分岐（デスクトップ版と同じ機構、現状のまま）
 - [ ] （Android実機確認待ち）`build_apk.bat`／`build_apk_personal.bat`によるリリースAPKビルド自体の動作確認（`run_android.bat`系の開発実行は一連の実機テスト——ダブルタップ・凡例・カーソル機能等——が行えたことから動作確認済みと判断できるが、リリースAPKビルドは別のGradleパス・minify設定のため未確認のまま）
 - [ ] （Android実機確認待ち）ボタン・スライダー等のタップ領域サイズが操作しやすいか確認（Material既定サイズのままで十分か、実物を見ないと判断できない部分）

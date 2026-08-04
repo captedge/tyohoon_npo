@@ -1695,7 +1695,23 @@ class _MapScreenState extends State<MapScreen> {
                           Text(
                             'JMA: ${jmaFetched[i].designation ?? jmaFetched[i].classification ?? "(unnamed)"}'
                             '${jmaFetched[i].centralPressureHpa == null ? '' : ' · ${jmaFetched[i].centralPressureHpa}hPa'}'
-                            '${jmaFetched[i].observedAtJst == null ? '' : ' (${_formatDateTime(jmaFetched[i].observedAtJst!)})'}',
+                            '${jmaFetched[i].observedAtJst == null ? '' : ' (${_formatDateTime(jmaFetched[i].observedAtJst!)})'}'
+                            // Forecast-point count (2026-08-04 addition, for
+                            // diagnosing "position shows but doesn't move"
+                            // reports): unlike jtwcInfo.summary (already
+                            // shown further down for the JTWC side), this app
+                            // had no way to tell from the UI whether a JMA
+                            // bulletin that successfully parsed a current
+                            // position actually came with a forecast track at
+                            // all — a real JMA-side possibility (5-day
+                            // forecasts are only issued for numbered typhoons
+                            // or TDs expected to develop within 24h, per JMA's
+                            // own publication practice) versus this app
+                            // fetching/keeping the wrong bulletin. Always
+                            // shown (including "0 forecast point(s)") rather
+                            // than only when non-zero, since "0" is the
+                            // diagnostically important case here.
+                            ' · ${jmaFetched[i].forecastTrack.length} forecast point(s)',
                             style: TextStyle(fontSize: 11, color: _jmaColor),
                           ),
                           // Offline-cache freshness readout (2026-07-29
