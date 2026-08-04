@@ -13,6 +13,12 @@ commit_message.txt
 .DS_Store
 Thumbs.db
 
+# 個人用ドキュメント（公開リポジトリには含めない、2026-08-05）
+# Wordの一時ロックファイル（~$で始まる）も同時に除外——同種のファイルが今後
+# docs/配下に増えても個別追記なしで対象になるようパターン化。
+/docs/Capt_Edge_出展準備ロードマップ.docx
+docs/~$*.doc*
+
 # 配布用ビルド生成物（build_release.batの出力、大容量のためgit管理対象外）
 /TyphoonShipTracker/
 /TyphoonShipTracker.zip

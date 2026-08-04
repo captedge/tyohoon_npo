@@ -60,3 +60,30 @@ flutter:
     - assets/ship_09.png
     - assets/ship_10.png
     - assets/typhoon_icon01.png
+    # フォントのライセンステキスト（2026-08-04追加）：About画面の
+    # 「Open-Source Licenses」一覧にComic Mono/Zen Maru Gothicのライセンスも
+    # 表示するため、main.dartのLicenseRegistry.addLicenseから
+    # rootBundle.loadStringで読み込む。`fonts:`セクションでの登録はttf自体を
+    # フォントアセットとして扱うだけで、この.txt自体は別途assetsに列挙しない
+    # と実行時に読み込めない（バンドルされない）ため、ここに明示的に追加。
+    - assets/fonts/ComicMono-LICENSE.txt
+    - assets/fonts/ZenMaruGothic-OFL.txt
+  # アプリ全体のフォント（2026-08-04追加、ユーザー指定）：日本語＝Zen Maru
+  # Gothic・英数字＝Comic Mono。両フォントとも1ウェイトのみのファイル
+  # （comic_mono_bold.ttf＝bold相当、zen_maru_gothic_medium.ttf＝medium相当）
+  # しか用意されていないため、そのウェイトを唯一の定義として登録している
+  # （太字・通常字それぞれ別ファイルを持たせる一般的な複数ウェイト構成ではな
+  # い）。実際の適用（fontFamily/fontFamilyFallbackの設定）はlib/main.dart
+  # 参照。ライセンス：Comic MonoはMIT（assets/fonts/ComicMono-LICENSE.txt）、
+  # Zen Maru GothicはSIL OFL 1.1（assets/fonts/ZenMaruGothic-OFL.txt）、いずれ
+  # もアプリへの同梱可。両ファイルとも上記assetsにも列挙済み（About画面の
+  # Open-Source Licensesページに表示するため、main.dart参照）。
+  fonts:
+    - family: Comic Mono
+      fonts:
+        - asset: assets/fonts/comic_mono_bold.ttf
+          weight: 700
+    - family: Zen Maru Gothic
+      fonts:
+        - asset: assets/fonts/zen_maru_gothic_medium.ttf
+          weight: 500

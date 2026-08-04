@@ -4,6 +4,13 @@
 
 ## 未着手・進行中
 
+- [ ] （Windows実機確認待ち）「Forecast」アイコンを台風の渦巻き（`Icons.cyclone`、Flutter標準Material Icons）に変更（2026-08-04実装）：`lib/screens/map_screen.dart`のAppBar。表示・視認性を確認する。
+- [ ] （Windows実機確認待ち）Range Ringに300nmを追加＋配色変更＋線を太く＋ラベル黒に変更（2026-08-04実装）：`lib/widgets/map_painter.dart`の`_drawTyphoonRings`/`_drawRing`。300nmは100nm/200nmと同じ描画パターンで追加。色はユーザー指定により100nm＝深紅(`0xFFB71C1C`)・200nm＝濃いオレンジ(`0xFFE65100`)・300nm＝紫(`0xFF6A1B9A`)。線の太さは1.5px→2.2pxに変更、ラベル文字色はリング色→黒(`Colors.black`)固定に変更。Range RingチェックボックスをOnにした状態で3本のリング（100/200/300nm）が正しい半径・配色・太さ・黒文字ラベルで表示されることを確認する。
+- [ ] （Windows実機確認待ち）台風アイコンの後ろに表示していた台風番号・名称ラベル（例："11W (NOUL)"）を削除（2026-08-04実装）：`lib/widgets/map_painter.dart`の`_drawTyphoonMarker`からラベル描画部分を削除、位置計算用の未使用関数`_typhoonBehindDirection`も削除。地図左上/右上固定の凡例ボックス側の台風名表示には影響なし（そちらは別経路で描画）。アイコンのみになり凡例ボックスと重複しないこと・地図が見やすくなったことを確認する。
+- [ ] （Windows実機確認待ち）台風初期（読み込み時）の気圧表示の文字色を台風の色（JTWC赤/JMAオレンジ寄りの濃色）→黒に変更（2026-08-04実装）：`lib/widgets/map_painter.dart`の`_drawTyphoonMarker`内`pressureLabel`描画部分。トラック開始点に固定表示される気圧の文字が黒で見やすいか確認する。
+
+- [ ] （Windows実機確認待ち）「Help」（取扱説明）画面：4章とも日本語版・英語版を実装完了（2026-08-04）。新規4つ目のAppBarアイコン（`Icons.help_outline`）から開く専用画面`lib/screens/help_screen.dart`。方針（ユーザー確認済み）：①配置＝独立した4つ目のAppBarアイコン、②対応言語＝日本語／英語のみ（画面右上のボタンで切替、デフォルト日本語）、③PC/Mobileの操作差分＝ユーザーに選ばせず`_isMobileUi`相当の判定で自動的に該当する方だけ表示。4章の内容：①地図の基本操作、②再生バー、③Passage Planメニュー、④Forecastメニュー（`_showPassagePlanDialog`/`_showLabelSettingsDialog`の実装を確認しながら執筆、ボタン名・挙動の実装との整合を確認済み）。日本語を先に執筆・ユーザー確認（複数回の文言修正を反映）した上で、確定した内容を英語に翻訳（2026-08-04、未使用になった`_translationPendingRow`プレースホルダーは削除済み）。日本語/EN切り替えボタンは右上→左上（AppBarの`leading`、戻る矢印の右隣）に移動済み（2026-08-04、`leadingWidth`でRow内に戻るボタンと並べて配置）。確認済み：括弧・引用符の対応、コメント除去後の括弧バランス（pythonでの機械チェック）。**2026-08-05追記・修正済み**：この左上配置後、英語表示時（ラベルが`'日本語'`になり`'EN'`より横幅が大きい）にRenderFlexオーバーフロー（Debug限定の黄黒斜め縞警告）が発生する不具合が発覚、`leadingWidth`を148→172に拡大して解消・ユーザーがWindows実機で確認済み（詳細`docs/devlog-help-screen-overflow-watermark.md`）。**残作業**：4章・日英とも実機で見た目とスクロールを確認する（切り替えボタンの左上配置・オーバーフロー自体は解消確認済みのため対象から除く）。
+- [ ] （Windows実機確認待ち）アプリ全体のフォント変更（2026-08-04実装、地図上のラベルにも同日追加対応）：日本語＝Zen Maru Gothic・英数字＝Comic Mono（いずれも`assets/fonts/`に同梱済みのフォントファイルを使用、Google Fonts等のオンライン取得はしない）。`pubspec.yaml`に`fonts:`セクションを追加。フォント名は新設の`lib/utils/app_fonts.dart`（`kLabelFontFamily`/`kLabelFontFamilyFallback`）に一元化し、`lib/main.dart`のThemeData（通常のダイアログ・メニュー等、ウィジェットツリー全体に自動適用）と、`lib/widgets/map_painter.dart`のCustomPainterが直接Canvasに描画する船名・距離ラベル（"N nm"）・Range Ringラベル（100/200/300nm）・台風気圧ラベルの計7箇所のTextStyle（CustomPainterはThemeDataを継承しないため個別適用が必要だった）の両方から参照する形に統一。例外：JTWC警報文貼り付け欄（`map_screen.dart`）は元々`fontFamily: 'monospace'`を明示指定しており、この変更の対象外で意図通り。**残作業**：UI全体・地図上のラベル双方でフォントが実際に切り替わっているか（日本語＝Zen Maru Gothic・英数字＝Comic Mono）を見た目で確認する（`run_windows.bat`／`build_apk.bat`の起動確認・Open-Source Licensesへのフォントライセンス追記はユーザー確認済み、`docs/completed-log.md`参照）。
 - [ ] （次回コミット待ち）今回の`.gitignore`修正（個人用ビルド生成物の除外追加）・関連ドキュメント更新をcommit.batでコミット・push（`cleanup_git_history.bat`実行時に作業ツリーがリセットされ一度失われたため再編集した分、2026-08-02）。
 
 - [ ] （Windows実機確認待ち、一部確認済み）JMA自動取得が予報無しの暫定電文を掴む不具合の修正（2026-08-04実装、Agentレビュー済み）：`lib/utils/jma_feed_fetcher.dart`の`fetchLatestJmaTyphoon`／`fetchActiveJmaTyphoons`に、最新電文に予報が無い場合は同一台風のより新しい予報付き電文を探して優先する処理を追加。**2613TY（DOLPHIN）で予報軌跡が復活することはユーザー確認済み。** 残り確認事項：①もう1つの台風（Typhoon 2枠）や「Import All (JMA)」でも同様に予報が正しく反映されること、②予報が本当に存在しない弱い熱帯低気圧等では従来どおり実況のみ（0件）で問題なく表示されること。
@@ -21,14 +28,14 @@
 - [ ] （Windows実機確認待ち）Passage Plan編集画面の緯度経度入力を10進度から度分（"DD-MM.MM"、例: 35-24.56）形式に変更（2026-07-31、`lib/utils/deg_min_format.dart`新設）：既存WPの表示・新規入力・不正値エラー表示、CSVインポート直後のWPを編集画面で開いた際の表示が正しく度分に変換されることを確認する。
 - [ ] CSVライブラリの上限50件到達時のエラー表示のみ未確認（他の全項目はWindows実機で確認済み、`docs/completed-log.md`参照）。50件貯める機会があれば確認する
 - [ ] （Windows実機確認待ち）複数台風同時発表対応・Import Allボタン（2026-07-29実装、1件のみの場合の動作は実機確認済み）：「Import All (JMA)」「Import All (JTWC)」で2件以上同時に見つかった場合、Typhoon 1/2/3それぞれ独立してDisplay On/Off切替できるか（コード上は独立していることを確認済みだが実機未確認）。あわせて完了メッセージ「Imported to Typhoon 1, 2」等の表記も確認。「Fetch」→「Import」への表記統一箇所（Import from JMA/JTWC、Import All）も見た目を確認。
-- [ ] **Passage Planの「Edit Plan」でのRe-Nameが、登録済みプランの表示名に反映されない不具合を修正（2026-08-xxユーザー報告、実装は次回）**：CSVライブラリ側で「Edit Plan」からRe-Nameすると、「Edit Plan」内リスト・「Select Plan」内リストの表示名は更新されるが、①既に登録済みのPassage Plan自体の表示名、②地図左上固定の凡例ボックス（タイトル「Passage Plan」の下に表示される各プラン名）は旧名のまま反映されない。2026-07-27時点では「登録済みプランの表示名はCSVファイル名固定・別物」という仕様としてユーザー確認済み（現状維持でOKとされていた、旧TASKS.mdの「決定待ち」参照）だったが、実際に使ってみて不整合が気になったとのことで、次回改めて実装する（Re-Name時に登録済みプランの表示名にも反映させる方向で）。関連：`lib/utils/csv_library.dart`（Rename処理）・登録済みPassage Planの表示名を持つ構造体・`lib/screens/map_screen.dart`の凡例ボックス描画箇所。
+- [ ] （Windows実機確認待ち）Passage Planの「Edit CSV」でのRe-Nameが、登録済みプランの表示名に反映されない不具合の修正（2026-08-04実装、Agentレビュー済み）：`lib/screens/map_screen.dart`の`_renameCsvLibraryEntry`に、リネーム後`_voyagePlans`内で`sourceCsvFileName`が一致するプランの`name`・`sourceCsvFileName`を更新する処理を追加（表示中でも即座にPassage Planメニュー・地図凡例ボックスへ反映される設計、2026-07-27の「現状維持でOK」判断を撤回）。本流／個人用・PC/Mobile共通の単一コードベースのため全ビルドに適用済み。確認事項：①表示中のPassage PlanをEdit CSVでRe-Nameし、メニュー・凡例ボックスの名前が即座に切り替わること、②Re-Name後にDeleteしても正しく登録済みプランごとカスケード削除されること。
 
 ## 決定待ち・要確認事項
 
-- [ ] **本流公開に向けた法務系項目：5点の方針決定・3つの実装（プライバシーポリシー本文・About画面・README）すべて完了（2026-08-04、経緯・詳細は`docs/release-checklist.md`・`docs/completed-log.md`参照）。残るのは以下のみ**：
-  - [ ] （次回コミット待ち）commit.batで一連の変更をコミット・push
-  - [ ] GitHub Pages有効化（Settings→Pages→branch: main, folder: /docs、手順は`docs/release-checklist.md`）→公開URLを確認
-  - [ ] （Windows実機確認待ち）About画面の英日併記2箇所（Data Sources注記・Disclaimer）の表示崩れがないか確認、⑤モバイル版でも同じAboutダイアログが開くこと（未確認）
+- [ ] **本流公開に向けた法務系項目：5点の方針決定・3つの実装（プライバシーポリシー本文・About画面・README）・コミット/`feature/mobile`→`main`マージ/push・GitHub Pages公開まで全て完了**（2026-08-04、`https://captedge.github.io/tyohoon_npo/privacy-policy.html`をユーザーがブラウザで閲覧確認済み。経緯・詳細は`docs/release-checklist.md`・`docs/completed-log.md`参照）。**残るのは以下のみ**：
+  - [ ] （Windows実機確認待ち）About画面の英日併記2箇所（Data Sources注記・Disclaimer）の表示崩れがないか確認
+  - [ ] （Android実機確認待ち）モバイル版でも同じAboutダイアログが開くこと（`_buildAppBar`はデスクトップ/モバイル共用のため理論上は自動反映される想定、未確認）
+  - [ ] プライバシーポリシーURL（上記）をGoogle Play Console／Microsoft Partner Centerのストア管理画面に登録（申請時）
 
 - **「Open-Meteo marine (trial)」メニュー削除の要望（2026-07-31仕様変更で依頼）について、対象となる独立メニュー項目がコード上に見当たらないことを確認**：2026-07-29時点では船の現在位置で試し取得するだけの独立ダイアログ（AppBarの専用ボタン）として存在したが、2026-07-30の「固定エリア・手動Import方式」への全面再設計時に、この独立ダイアログ自体が廃止され、Display切替・Importボタンとも「Forecast」（旧Information）ダイアログ内の「Wave Field (Open-Meteo, personal build)」セクション1つに統合済みだった（`_showLabelSettingsDialog`、AppBarには対応するボタンなし）。ユーザーが「取得はInformationからできるため不要」と説明した独立メニューは、この統合により既に存在しない状態と見られる。Wave Field機能本体・個人用ビルドの仕組み（`kPersonalBuild`）はユーザー指示により削除せず維持。次回セッションでWindows実機の実際のメニュー表示を見ながら、削除すべき項目が本当に残っていないか再確認する。
 - より高精細な海岸線データ（1:10m相当）への差し替え（優先度低、`docs/devlog-map-design.md`参照）

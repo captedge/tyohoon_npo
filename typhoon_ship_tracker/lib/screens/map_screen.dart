@@ -32,6 +32,7 @@ import '../utils/voyage_plan_parser.dart';
 import '../utils/wave_field.dart';
 import '../utils/wave_field_cache.dart';
 import '../widgets/map_painter.dart';
+import 'help_screen.dart';
 import 'voyage_plan_screen.dart';
 
 /// Main screen: map view with zoom controls and a time slider/play button.
@@ -2221,13 +2222,16 @@ class _MapScreenState extends State<MapScreen> {
     await _selectCsvFromLibrary(selected);
   }
 
-  // Renames a CSV library entry (2026-07-27 request, new functionality —
-  // Passage Plan entries themselves still have no rename UI, see TASKS.md).
+  // Renames a CSV library entry (2026-07-27 request, new functionality).
   // Validates: non-empty, no path separators (would otherwise escape the
   // library folder via File.rename), and no collision with another
   // existing library entry — shown inline as an error rather than a
   // separate dialog, same pattern as _showLabelSettingsDialog's
-  // parseErrors.
+  // parseErrors. Also propagates the new name to any already-registered
+  // Passage Plan(s) sourced from this file, even while currently displayed
+  // on the map (2026-08-04 request: previously the plan's own name/menu/
+  // legend label stayed stale until the library file was re-selected — see
+  // VoyagePlanEntry.sourceCsvFileName's doc comment).
   Future<void> _renameCsvLibraryEntry(String oldFileName) async {
     final controller = TextEditingController(text: _fileNameWithoutExtension(oldFileName));
     await showDialog<void>(
@@ -2266,6 +2270,27 @@ class _MapScreenState extends State<MapScreen> {
                       return;
                     }
                     await CsvLibrary.rename(oldFileName, newFileName);
+                    if (!mounted) return;
+                    // Keep any already-registered Passage Plan(s) sourced
+                    // from this file in sync with the rename (2026-08-04
+                    // request: previously the plan's own name/legend/menu
+                    // label stayed stale — showing the old name — until the
+                    // library file was re-selected via Select CSV/re-opened
+                    // in Edit CSV, which did pick up the new name because
+                    // those read the library filename fresh each time. See
+                    // VoyagePlanEntry.sourceCsvFileName's doc comment,
+                    // updated to match — this reverses the 2026-07-27
+                    // decision to leave registered plans untouched on
+                    // rename, per the user's follow-up request).
+                    setState(() {
+                      for (final plan in _voyagePlans) {
+                        if (plan.sourceCsvFileName == oldFileName) {
+                          plan.name = _fileNameWithoutExtension(newFileName);
+                          plan.sourceCsvFileName = newFileName;
+                        }
+                      }
+                    });
+                    _saveState();
                     // State-level `mounted` (not a BuildContext extension),
                     // same convention as every other async gap in this file
                     // (see _editVoyagePlanEntry etc.) — avoids relying on
@@ -2297,8 +2322,10 @@ class _MapScreenState extends State<MapScreen> {
   // there's none, delete immediately with no prompt, same as before. Plans
   // registered before sourceCsvFileName existed (null) are never matched,
   // so deleting their source file's *current* library entry never touches
-  // them — same for a plan whose source file was later renamed in the
-  // library (see that field's doc comment).
+  // them. A plan whose source file was later renamed in the library *is*
+  // still matched here (2026-08-04 change — sourceCsvFileName is now kept
+  // in sync with renames, see that field's doc comment and
+  // _renameCsvLibraryEntry below).
   Future<void> _deleteCsvLibraryEntry(String fileName) async {
     final linkedPlans = [
       for (var i = 0; i < _voyagePlans.length; i++)
@@ -2860,8 +2887,8 @@ class _MapScreenState extends State<MapScreen> {
   String? _jmaMarkerLabel(_TyphoonSlot slot, {String? fallback}) =>
       slot.jmaInfo.designation == null ? fallback : 'JMA${slot.jmaInfo.designation}';
 
-  // Toggles a typhoon's 100nm/200nm rings when its red icon is tapped on the
-  // map (2026-08-14 request: "台風アイコン赤丸をクリックで切り替え"). Called
+  // Toggles a typhoon's 100nm/200nm/300nm rings when its red icon is tapped
+  // on the map (2026-08-14 request: "台風アイコン赤丸をクリックで切り替え"). Called
   // from the GestureDetector wrapped around the map's CustomPaint in
   // build() — [scenePosition] is already in canvas/scene coordinates (the
   // same units as MapBounds.toOffset), since Flutter's hit-testing resolves
@@ -3643,9 +3670,14 @@ class _MapScreenState extends State<MapScreen> {
         // that used to sit here — now a per-typhoon-slot checkbox inside
         // this dialog, see _showLabelSettingsDialog's rangeRingAndColorRow)
         // and Ship's Name moved to the Passage Plan dialog, leaving this
-        // button as purely the typhoon Forecast entry point.
+        // button as purely the typhoon Forecast entry point. Icon changed
+        // 2026-08-04 from a generic notepad icon (Icons.edit_note) to
+        // Icons.cyclone — Flutter's built-in Material Icons set already
+        // includes a simple typhoon/storm-spiral glyph, so no custom
+        // asset/package was needed (user request: "台風を表すようなシンプル
+        // な渦巻き").
         IconButton(
-          icon: const Icon(Icons.edit_note),
+          icon: const Icon(Icons.cyclone),
           tooltip: 'Forecast',
           onPressed: _showLabelSettingsDialog,
         ),
@@ -3659,6 +3691,21 @@ class _MapScreenState extends State<MapScreen> {
           icon: const Icon(Icons.info_outline),
           tooltip: 'About',
           onPressed: _showAboutDialog,
+        ),
+        // Added 2026-08-04 (user request): on-screen operation/menu
+        // instructions, since the app is meant to be used offline by a
+        // ship captain with no one else around to ask. A 4th AppBar icon —
+        // see docs/release-checklist.md's 2026-08-04 note on the "About"
+        // icon already having superseded the earlier "exactly two icons"
+        // policy, so this isn't a new precedent. Pushed as a full screen
+        // (see HelpScreen's doc comment) rather than opened as a dialog
+        // like About, since its eventual full content is much longer.
+        IconButton(
+          icon: const Icon(Icons.help_outline),
+          tooltip: 'Help',
+          onPressed: () {
+            Navigator.push(context, MaterialPageRoute(builder: (_) => const HelpScreen()));
+          },
         ),
       ],
     );
@@ -3903,7 +3950,8 @@ class _TyphoonSlot {
   // app's usual convention (see jtwc_parser.dart's issuedAtJst doc comment).
   DateTime? jmaFetchedAtJst;
 
-  // 100nm/200nm distance rings (2026-08-14 request). Toggled from the
+  // 100nm/200nm/300nm distance rings (2026-08-14 request, 300nm ring added
+  // 2026-08-04). Toggled from the
   // Forecast dialog's per-source Range Ring checkbox (2026-08-xx: moved out
   // of a standalone AppBar menu — see _showLabelSettingsDialog's
   // rangeRingAndColorRow) or by tapping a displayed typhoon icon on the map

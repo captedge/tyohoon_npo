@@ -21,9 +21,14 @@ import 'portable_storage_dir.dart';
 /// registered plans when a library file is deleted — see
 /// `_MapScreenState._deleteCsvLibraryEntry`).
 ///
-/// Renaming a library entry never touches any already-registered Passage
-/// Plan (2026-07-27, user confirmed this is fine as-is — the plan's own
-/// name/data stays exactly as registered). Deleting a library entry
+/// Renaming a library entry also updates the name (and
+/// `sourceCsvFileName` link) of any already-registered Passage Plan(s)
+/// sourced from it, so the Passage Plan menu/legend label stays in sync
+/// (2026-08-04, reversing the original 2026-07-27 decision to leave
+/// registered plans untouched on rename — see
+/// `_MapScreenState._renameCsvLibraryEntry` in map_screen.dart for the
+/// sync logic; this class itself only renames the file). Deleting a
+/// library entry
 /// *does* cascade to any currently-registered plan(s) sourced from it
 /// (2026-07-27, revised same day at the user's request — the first version
 /// left the plan behind, which was confusing): the caller confirms first

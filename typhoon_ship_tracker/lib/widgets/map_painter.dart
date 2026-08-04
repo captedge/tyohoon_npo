@@ -3,6 +3,7 @@ import 'dart:ui' as ui;
 
 import 'package:flutter/material.dart';
 
+import '../utils/app_fonts.dart';
 import '../utils/color_palette.dart';
 import '../utils/interpolation.dart';
 import '../utils/map_bounds.dart';
@@ -45,7 +46,7 @@ class TyphoonMarker {
   /// comment for why `DateTime.utc(...)` is deliberately avoided app-wide).
   final List<DateTime> trackTimes;
 
-  /// Whether to draw the 100nm/200nm distance rings around
+  /// Whether to draw the 100nm/200nm/300nm distance rings around
   /// [currentPosition] (2026-08-14 request). Off by default; toggled either
   /// from the AppBar's rings menu or by tapping the typhoon's red icon on
   /// the map — both handled by the caller (map_screen.dart), this painter
@@ -650,6 +651,8 @@ class MapPainter extends CustomPainter {
     color: Colors.black,
     fontSize: 9,
     fontWeight: FontWeight.w600,
+    fontFamily: kLabelFontFamily,
+    fontFamilyFallback: kLabelFontFamilyFallback,
   );
 
   void _drawForecastPointTime(Canvas canvas, Offset center, double dotRadius, DateTime time) {
@@ -731,7 +734,13 @@ class MapPainter extends CustomPainter {
     Color color, {
     Offset extraOffset = Offset.zero,
   }) {
-    const style = TextStyle(color: Colors.black, fontSize: 12, fontWeight: FontWeight.w700);
+    const style = TextStyle(
+      color: Colors.black,
+      fontSize: 12,
+      fontWeight: FontWeight.w700,
+      fontFamily: kLabelFontFamily,
+      fontFamilyFallback: kLabelFontFamilyFallback,
+    );
     final painter = TextPainter(
       text: TextSpan(text: '${distanceNm.round()} nm', style: style),
       textDirection: TextDirection.ltr,
@@ -764,7 +773,15 @@ class MapPainter extends CustomPainter {
   /// without needing to duplicate this sizing math.
   double _distanceLabelExtent(double startDistance, double distanceNm) {
     final painter = TextPainter(
-      text: TextSpan(text: '${distanceNm.round()} nm', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+      text: TextSpan(
+        text: '${distanceNm.round()} nm',
+        style: const TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          fontFamily: kLabelFontFamily,
+          fontFamilyFallback: kLabelFontFamilyFallback,
+        ),
+      ),
       textDirection: TextDirection.ltr,
     )..layout();
     const paddingH = 6.0;
@@ -782,7 +799,15 @@ class MapPainter extends CustomPainter {
   /// stacked JTWC/JMA pair so the two boxes don't overlap.
   double _distanceLabelBoxHeight() {
     final painter = TextPainter(
-      text: const TextSpan(text: '0 nm', style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700)),
+      text: const TextSpan(
+        text: '0 nm',
+        style: TextStyle(
+          fontSize: 12,
+          fontWeight: FontWeight.w700,
+          fontFamily: kLabelFontFamily,
+          fontFamilyFallback: kLabelFontFamilyFallback,
+        ),
+      ),
       textDirection: TextDirection.ltr,
     )..layout();
     const paddingV = 3.0;
@@ -809,35 +834,12 @@ class MapPainter extends CustomPainter {
     return const Offset(0, 1); // south, opposite the default north-pointing icon
   }
 
-  // Unit vector pointing opposite a typhoon's direction of travel, used to
-  // place its designation label "behind" it the same way a ship's name sits
-  // behind the ship (2026-08-xx request). Unlike the ship there's no
-  // explicit "next waypoint" — direction is inferred from the track itself:
-  // prefer the next forecast point just ahead of the current (interpolated)
-  // position ([futureTrack]'s second point, since its first point is always
-  // the current position — see splitTrackAtTime); if there's no forecast
-  // data left (already past the last point), fall back to the most recent
-  // leg of [pastTrack]. Falls back to south, matching the ship's own
-  // no-data fallback, if there isn't enough track to infer a direction from.
-  Offset _typhoonBehindDirection(TyphoonMarker typhoon, Offset currentOffset) {
-    if (typhoon.futureTrack.length >= 2) {
-      final target = typhoon.futureTrack[1];
-      final targetOffset = MapBounds.toOffset(target.latitude, target.longitude);
-      final dx = targetOffset.dx - currentOffset.dx;
-      final dy = targetOffset.dy - currentOffset.dy;
-      final length = math.sqrt(dx * dx + dy * dy);
-      if (length > 0) return Offset(-dx / length, -dy / length);
-    }
-    if (typhoon.pastTrack.length >= 2) {
-      final previous = typhoon.pastTrack[typhoon.pastTrack.length - 2];
-      final previousOffset = MapBounds.toOffset(previous.latitude, previous.longitude);
-      final dx = currentOffset.dx - previousOffset.dx;
-      final dy = currentOffset.dy - previousOffset.dy;
-      final length = math.sqrt(dx * dx + dy * dy);
-      if (length > 0) return Offset(-dx / length, -dy / length);
-    }
-    return const Offset(0, 1); // south, same no-data fallback as the ship
-  }
+  // (Formerly a _typhoonBehindDirection helper lived here, computing the
+  // unit vector opposite a typhoon's travel direction to place its
+  // designation label "behind" it — same idea as _shipBehindDirection
+  // above. Removed 2026-08-04 along with that label itself, see
+  // _drawTyphoonMarker below — user request: "アイコンの後ろのラベルは削除
+  // する". Nothing else in the file called it.)
 
   // Ship icon: an isosceles triangle whose apex points toward its next
   // waypoint (2026-07-27 request) instead of always pointing north. The
@@ -979,7 +981,13 @@ class MapPainter extends CustomPainter {
     var nextStart = gap;
     final name = ship.label.trim();
     if (name.isNotEmpty) {
-      const nameStyle = TextStyle(color: Colors.black87, fontSize: 11, fontWeight: FontWeight.w600);
+      const nameStyle = TextStyle(
+        color: Colors.black87,
+        fontSize: 11,
+        fontWeight: FontWeight.w600,
+        fontFamily: kLabelFontFamily,
+        fontFamilyFallback: kLabelFontFamilyFallback,
+      );
       final namePainter = TextPainter(
         text: TextSpan(text: name, style: nameStyle),
         textDirection: TextDirection.ltr,
@@ -1027,28 +1035,30 @@ class MapPainter extends CustomPainter {
     canvas.restore();
   }
 
-  // Moving "now" marker + label (designation only, e.g. "11W (NOUL)") at
-  // the current slider time, plus — pinned to the track's *first* point
+  // Moving "now" marker (icon only — see 2026-08-04 note below on the
+  // designation label that used to follow it) at the current slider time,
+  // plus — pinned to the track's *first* point
   // rather than following the marker — the central pressure at read time
   // (2026-07-28: "読み込み時の最低気圧は最初の点に残し固定。再生後は「番号
   // （名称）」のみ追従する").
-  // 2026-08-03: icon + labels drawn inside translate+scale(1/zoom) blocks
-  // (fixed-size request), same treatment as _drawShip.
+  // 2026-08-03: icon + pressure label drawn inside translate+scale(1/zoom)
+  // blocks (fixed-size request), same treatment as _drawShip.
   // Typhoon icon: assets/typhoon_icon01.png, a square swirl graphic —
   // anchored at its own center (2026-08-xx request), so unlike the ship
   // icon no anchor-fraction offset is needed. Display size chosen close to
   // the previous placeholder circle's diameter (20px, radius 10).
+  // 2026-08-04: the designation label ("11W (NOUL)") that used to sit
+  // behind the icon (added 2026-08-xx, following the typhoon's direction
+  // of travel like the ship name) was removed entirely per user request
+  // ("アイコンの後ろのラベルは削除する") — the designation is still shown
+  // in the fixed legend box (map_screen.dart), this was purely the
+  // marker-following copy of it.
   static const double _typhoonIconDisplaySizePx = 24.0;
 
   void _drawTyphoonMarker(Canvas canvas, TyphoonMarker typhoon) {
     final o = MapBounds.toOffset(typhoon.currentPosition.latitude, typhoon.currentPosition.longitude);
     _drawTyphoonRings(canvas, typhoon, o);
 
-    // Designation label ("11W (NOUL)") now sits behind the typhoon's
-    // direction of travel (2026-08-xx request), same treatment as the ship
-    // name — previously fixed to the right of the icon. Font size/weight/
-    // color unchanged.
-    final behind = _typhoonBehindDirection(typhoon, o);
     canvas.save();
     canvas.translate(o.dx, o.dy);
     canvas.scale(_invZoom);
@@ -1078,16 +1088,6 @@ class MapPainter extends CustomPainter {
       canvas.drawCircle(Offset.zero, 10, paint);
       canvas.drawCircle(Offset.zero, 10, border);
     }
-
-    final labelStyle = TextStyle(color: typhoon.color, fontSize: 11, fontWeight: FontWeight.w600);
-    final labelPainter = TextPainter(
-      text: TextSpan(text: typhoon.label, style: labelStyle),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    const gap = 14.0; // clearance from the typhoon icon (radius 10)
-    final diagonal = math.sqrt(labelPainter.width * labelPainter.width + labelPainter.height * labelPainter.height);
-    final labelCenter = behind * (gap + diagonal / 2);
-    labelPainter.paint(canvas, labelCenter - Offset(labelPainter.width / 2, labelPainter.height / 2));
     canvas.restore();
 
     final pressureLabel = typhoon.pressureLabel;
@@ -1097,33 +1097,50 @@ class MapPainter extends CustomPainter {
       canvas.save();
       canvas.translate(startOffset.dx, startOffset.dy);
       canvas.scale(_invZoom);
-      _drawText(canvas, pressureLabel, const Offset(12, 8),
-          TextStyle(color: Color.lerp(typhoon.color, Colors.black, 0.35), fontSize: 10, fontWeight: FontWeight.w600));
+      // Black (2026-08-04 request — previously blended 35% toward black
+      // from the typhoon's source color, e.g. a red-tinted near-black for
+      // JTWC).
+      _drawText(
+        canvas,
+        pressureLabel,
+        const Offset(12, 8),
+        const TextStyle(
+          color: Colors.black,
+          fontSize: 10,
+          fontWeight: FontWeight.w600,
+          fontFamily: kLabelFontFamily,
+          fontFamilyFallback: kLabelFontFamilyFallback,
+        ),
+      );
       canvas.restore();
     }
   }
 
-  // 100nm/200nm distance rings around a typhoon's current position
-  // (2026-08-14 request), toggled per-typhoon via [TyphoonMarker.showRings].
-  // Colors are an initial pick ("ひとまずお任せ" — user deferred to us),
-  // chosen to read clearly against the sea/land/track/marker palette
-  // already in use: teal for the inner (100nm) ring, purple for the outer
-  // (200nm) one.
-  static const _ring100Color = Color(0xFF00897B);
-  static const _ring200Color = Color(0xFF6A1B9A);
-  static const double _ringStrokeWidthPx = 1.5;
+  // 100nm/200nm/300nm distance rings around a typhoon's current position
+  // (2026-08-14 request, 300nm ring added 2026-08-04). Toggled per-typhoon
+  // via [TyphoonMarker.showRings]. Colors were initially an "ひとまずお任せ"
+  // pick (teal/purple/indigo), then changed same day per explicit user
+  // request to a dark red → dark orange → purple progression: crimson for
+  // the inner (100nm) ring, burnt orange for the middle (200nm) one, purple
+  // for the outer (300nm) one.
+  static const _ring100Color = Color(0xFFB71C1C); // dark red (深紅)
+  static const _ring200Color = Color(0xFFE65100); // dark orange (濃いオレンジ)
+  static const _ring300Color = Color(0xFF6A1B9A); // purple (紫)
+  // Widened from 1.5 to 2.2 (2026-08-04 request: "少し太く").
+  static const double _ringStrokeWidthPx = 2.2;
 
   // Rings are drawn in scene coordinates (so they zoom/pan with the map
   // like the coastline — they represent a real geographic distance, unlike
   // the fixed-size icons/labels), converting nautical miles to canvas
-  // pixels via [_pxPerNm]. Their outline thickness and the "100nm"/"200nm"
-  // labels are still fixed-size on screen, same treatment as the other
-  // labels (translate+scale(1/zoom)).
+  // pixels via [_pxPerNm]. Their outline thickness and the "100nm"/"200nm"/
+  // "300nm" labels are still fixed-size on screen, same treatment as the
+  // other labels (translate+scale(1/zoom)).
   void _drawTyphoonRings(Canvas canvas, TyphoonMarker typhoon, Offset center) {
     if (!typhoon.showRings) return;
     final pxPerNm = _pxPerNm(typhoon.currentPosition.latitude);
     _drawRing(canvas, center, 100 * pxPerNm, _ring100Color, '100nm');
     _drawRing(canvas, center, 200 * pxPerNm, _ring200Color, '200nm');
+    _drawRing(canvas, center, 300 * pxPerNm, _ring300Color, '300nm');
   }
 
   // Canvas pixels per nautical mile at [latDeg] — a single scalar since Web
@@ -1142,6 +1159,9 @@ class MapPainter extends CustomPainter {
   // plus its "100nm"/"200nm" label just outside the ring at the top
   // (12 o'clock) — simple, predictable placement that doesn't need to
   // reason about the typhoon's heading the way the designation label does.
+  // The label is black (2026-08-04 request — previously matched the ring's
+  // own color, which was hard to read for the lighter ring colors) while
+  // the ring outline itself still uses [color].
   void _drawRing(Canvas canvas, Offset center, double radiusScene, Color color, String label) {
     final paint = Paint()
       ..color = color.withOpacity(0.85)
@@ -1149,7 +1169,13 @@ class MapPainter extends CustomPainter {
       ..strokeWidth = _ringStrokeWidthPx * _invZoom;
     canvas.drawCircle(center, radiusScene, paint);
 
-    final labelStyle = TextStyle(color: color, fontSize: 9, fontWeight: FontWeight.w600);
+    final labelStyle = const TextStyle(
+      color: Colors.black,
+      fontSize: 9,
+      fontWeight: FontWeight.w600,
+      fontFamily: kLabelFontFamily,
+      fontFamilyFallback: kLabelFontFamilyFallback,
+    );
     final painter = TextPainter(
       text: TextSpan(text: label, style: labelStyle),
       textDirection: TextDirection.ltr,
