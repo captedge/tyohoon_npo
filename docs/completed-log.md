@@ -5,7 +5,7 @@
 書式：
 `**タイトル**（日付、コミットハッシュ、該当すればブランチ名）— 結論1〜2行。詳細は`docs/devlog-xxx.md`（devlogを作らない軽微な変更なら省略）。`
 
-**Help画面を英語表示にした時だけ現れる謎の透かし（デバッグ限定）を調査・修正、正体はFlutterのRenderFlexオーバーフロー警告と判明**（2026-08-05、未コミット）— `run_windows.bat`実行中、Helpメニューを英語表示にした時だけ黄黒斜め縞＋赤字の透かしが出る不具合。当初は文字列（誤読で「ReLoved」）から外部ツール・不正アクティベータ等の混入を疑い調査したが的外れで、実際は`lib/screens/help_screen.dart`の言語切替ボタン（`leadingWidth: 148`固定）が、英語モード時のラベル`'日本語'`（全角3文字、`'EN'`より幅広）でわずかにオーバーフローし、Flutter標準のデバッグ専用警告（Releaseビルドではアサーション無効化により非表示）が描画されていたもの。`leadingWidth`を172に拡大して解消、ユーザーがWindows実機で再現しないことを確認済み（「でなくなりました：解決です」）。調査の経過（外部要因を疑った寄り道と、そこから自プロダクト要因に切り替える決め手になった情報）は`docs/devlog-help-screen-overflow-watermark.md`参照。
+**Help画面を英語表示にした時だけ現れる謎の透かし（デバッグ限定）を調査・修正、正体はFlutterのRenderFlexオーバーフロー警告と判明**（2026-08-05、`4b73dd8`、main）— `run_windows.bat`実行中、Helpメニューを英語表示にした時だけ黄黒斜め縞＋赤字の透かしが出る不具合。当初は文字列（誤読で「ReLoved」）から外部ツール・不正アクティベータ等の混入を疑い調査したが的外れで、実際は`lib/screens/help_screen.dart`の言語切替ボタン（`leadingWidth: 148`固定）が、英語モード時のラベル`'日本語'`（全角3文字、`'EN'`より幅広）でわずかにオーバーフローし、Flutter標準のデバッグ専用警告（Releaseビルドではアサーション無効化により非表示）が描画されていたもの。`leadingWidth`を172に拡大して解消、ユーザーがWindows実機で再現しないことを確認済み（「でなくなりました：解決です」）。調査の経過（外部要因を疑った寄り道と、そこから自プロダクト要因に切り替える決め手になった情報）は`docs/devlog-help-screen-overflow-watermark.md`参照。
 
 **フォントライセンス表示機能のimport不備で`run_windows.bat`／`build_apk.bat`が起動不能になった不具合を修正、再発防止ルールを`docs/operation-rules.md`に追加**（2026-08-04）— `lib/main.dart`で`LicenseRegistry`/`LicenseEntryWithLineBreaks`（`package:flutter/foundation.dart`由来）を、既存のimportが`show kIsWeb`に限定されていることを確認せず使用し、コンパイルエラーで全ビルド対象が同時に失敗した。ユーザー提供のビルドログから原因特定・修正。ユーザーからの指摘（「調べればわかることが納品前に確認されずエラーになる場合が多い」）を受け、`docs/operation-rules.md`「完了報告前チェック」に項目11（初めて使うFlutter/Dart framework APIのimport元をWebSearchで確認してから使う）を追加。**修正後、`run_windows.bat`・`build_apk.bat`とも問題なく起動・ビルドできることをユーザーがWindows実機で確認済み**（「できた」）。
 
